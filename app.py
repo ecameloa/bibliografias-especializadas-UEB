@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v6.1 – Bitácora con ceros, control de filas visibles y persistencia de resultados
+# v7.0 – Autodescarga inicial + indicadores persistentes + nueva búsqueda en memoria + UX y tema claro/oscuro (beta)
 
 import io
 import os
@@ -10,14 +10,16 @@ import requests
 import pandas as pd
 import streamlit as st
 
-# ---------- CONFIG ----------
+# =============== CONFIG INICIAL ===============
 st.set_page_config(page_title="Herramienta de bibliografías", layout="wide")
 
-LOGO_URL = "https://biblioteca.unbosque.edu.co/sites/default/files/Logos/Logo%201%20Blanco.png"
+# Logos según tema
+LOGO_DARK = "https://biblioteca.unbosque.edu.co/sites/default/files/Logos/Logo%201%20Blanco.png"
+LOGO_LIGHT = "https://biblioteca.unbosque.edu.co/sites/default/files/Logos/Logo%201%20ORG.png"
 
 # URLs oficiales
 URL_DIGITAL = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20Colecci%C3%B3n%20Digital.xlsx"
-URL_FISICA   = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20BD%20Colecci%C3%B3n%20F%C3%ADsica.xlsx"
+URL_FISICA  = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20BD%20Colecci%C3%B3n%20F%C3%ADsica.xlsx"
 
 URL_PLANTILLA_TEMATICAS = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20Tem%C3%A1ticas.xlsx"
 URL_PLANTILLA_EXCLUSION = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20T%C3%A9rminos%20a%20excluir.xlsx"
@@ -30,26 +32,35 @@ DEFAULT_DUP_FISICA    = "No. Topográfico"
 
 UA = {"User-Agent": "Mozilla/5.0"}
 
-# ---------- ESTADO ----------
+# =============== ESTADO ===============
 ss = st.session_state
+
+# Datos principales y auxiliares
 ss.setdefault("df_digital", None)
 ss.setdefault("df_fisica", None)
 ss.setdefault("tematicas_df", None)
 ss.setdefault("excluir_df", None)
-ss.setdefault("loaded_from_web", False)
 
-# flags de feedback
+# Flags de dónde provienen y autodescarga
+ss.setdefault("loaded_from_web", False)
+ss.setdefault("auto_started", False)  # para autodescarga en primer arranque
+
+# Flags de progreso/descarga/procesado
 ss.setdefault("downloading_digital", False)
 ss.setdefault("downloading_fisica", False)
 ss.setdefault("processing_digital", False)
 ss.setdefault("processing_fisica", False)
 ss.setdefault("busy_msg", "")
 
-# resultados persistentes
+# Resultados persistentes
 ss.setdefault("results_df", None)
 ss.setdefault("bitacora_df", None)
 
-# ---------- UTILIDADES ----------
+# Preferencias de UI
+ss.setdefault("ui_theme", "Oscuro")  # Oscuro | Claro
+ss.setdefault("ask_switch_source", False)  # confirmación al cambiar fuente si ya hay oficiales
+
+# =============== UTILIDADES ===============
 def normalize_text(s):
     if pd.isna(s):
         return ""
@@ -154,22 +165,67 @@ def read_excel_from_bytes(bio, label="archivo"):
         df = df.fillna("")
     return df
 
-# ---------- SIDEBAR ----------
+# =============== CSS: ANCHO SIDEBAR + TEMA ===============
+SIDEBAR_CSS = """
+<style>
+/* Ancho máximo del sidebar para que no aparezca angosto */
+section[data-testid="stSidebar"] { min-width: 420px; max-width: 420px; }
+/* Cards/info más legibles */
+.block-container { padding-top: 1.2rem; }
+</style>
+"""
+st.markdown(SIDEBAR_CSS, unsafe_allow_html=True)
+
+# Tema claro/oscuro (beta) aplicado sobre elementos (no cambia el theme de Streamlit en vivo)
+def apply_inline_theme(theme_name: str):
+    if theme_name == "Claro":
+        st.markdown("""
+        <style>
+        .theme-surface { background: #ffffff; color: #111111; }
+        .theme-panel   { background: #f4f6f8; border-radius: 8px; padding: 12px; }
+        </style>
+        """, unsafe_allow_html=True)
+        return LOGO_LIGHT
+    else:
+        st.markdown("""
+        <style>
+        .theme-surface { background: #0e1117; color: #ffffff; }
+        .theme-panel   { background: #0f172a; border-radius: 8px; padding: 12px; }
+        </style>
+        """, unsafe_allow_html=True)
+        return LOGO_DARK
+
+# =============== SIDEBAR ===============
 with st.sidebar:
-    st.image(LOGO_URL, use_container_width=True)
+    # selector de tema
+    ss.ui_theme = st.segmented_control("Tema", options=["Oscuro","Claro"], default="Oscuro")
+
+logo = apply_inline_theme(ss.ui_theme)
+
+with st.sidebar:
+    st.image(logo, use_container_width=True)
     st.caption("Biblioteca Juan Roa Vásquez")
 
     st.markdown("### Carga de archivos")
-    st.caption("**Opcional:** cargar directamente las bases oficiales desde la web")
+
+    # Fuente de datos (con aviso si ya hay oficiales cargadas)
     fuente = st.radio("Fuente de datos", options=("Desde web oficial","Subir archivos"), index=0)
+    if fuente == "Subir archivos" and (ss.df_digital is not None or ss.df_fisica is not None) and ss.loaded_from_web:
+        st.warning(
+            "Estás cambiando a **archivos locales**. "
+            "Si adjuntas archivos puede que **no consultes la última versión**. "
+            "Los archivos adjuntos **no se almacenan** por la Universidad. Se eliminan al cerrar la app.",
+            icon="⚠️"
+        )
 
     sb_status = st.container()
 
+    # Botones oficiales con estado/indicador permanente y deshabilitar si ya está cargado
     c1, c2 = st.columns(2)
     with c1:
-        disabled = ss.downloading_digital or ss.processing_digital
-        dig_label = "💾 Digital (oficial)" if not ss.downloading_digital else "⏳ Descargando…"
-        if st.button(dig_label, use_container_width=True, disabled=disabled):
+        disabled_dig = ss.downloading_digital or ss.processing_digital or (ss.df_digital is not None and ss.loaded_from_web)
+        dig_label = "💾 Digital (oficial)" if ss.df_digital is None else "✅ Digital cargada"
+        if st.button(dig_label, use_container_width=True, disabled=disabled_dig):
             try:
                 ss.busy_msg = "Descargando base Digital…"
                 ss.downloading_digital = True
@@ -187,9 +243,9 @@ with st.sidebar:
                 ss.busy_msg = ""
 
     with c2:
-        disabled = ss.downloading_fisica or ss.processing_fisica
-        fis_label = "💾 Física (oficial)" if not ss.downloading_fisica else "⏳ Descargando…"
-        if st.button(fis_label, use_container_width=True, disabled=disabled):
+        disabled_fis = ss.downloading_fisica or ss.processing_fisica or (ss.df_fisica is not None and ss.loaded_from_web)
+        fis_label = "💾 Física (oficial)" if ss.df_fisica is None else "✅ Física cargada"
+        if st.button(fis_label, use_container_width=True, disabled=disabled_fis):
             try:
                 ss.busy_msg = "Descargando base Física…"
                 ss.downloading_fisica = True
@@ -206,18 +262,19 @@ with st.sidebar:
                 ss.processing_fisica = False
                 ss.busy_msg = ""
 
+    # Carga manual (solo si elige "Subir archivos")
     if fuente == "Subir archivos":
         st.markdown("**O sube tus archivos manualmente (.xlsx)**")
-        up_dig = st.file_uploader("Base de datos digital (.xlsx)", type=["xlsx"], key="up_dig_v6_1")
-        up_fis = st.file_uploader("Base de datos física (.xlsx)",  type=["xlsx"], key="up_fis_v6_1")
+        up_dig = st.file_uploader("Base de datos digital (.xlsx)", type=["xlsx"], key="up_dig_v7_0")
+        up_fis = st.file_uploader("Base de datos física (.xlsx)",  type=["xlsx"], key="up_fis_v7_0")
         if up_dig is not None:
             ss.df_digital = read_excel_from_bytes(up_dig, "base Digital")
             ss.loaded_from_web = False
-            st.success("Base Digital cargada.")
+            st.success("Base Digital cargada (archivo local).")
         if up_fis is not None:
             ss.df_fisica = read_excel_from_bytes(up_fis, "base Física")
             ss.loaded_from_web = False
-            st.success("Base Física cargada.")
+            st.success("Base Física cargada (archivo local).")
 
     st.markdown("---")
     st.caption("**Plantillas oficiales:**")
@@ -225,8 +282,8 @@ with st.sidebar:
     st.markdown(f"- [Términos a excluir]({URL_PLANTILLA_EXCLUSION})")
 
     st.markdown("### Archivos auxiliares (obligatorios)")
-    tem_up = st.file_uploader("Temáticas (.xlsx, col1=término, col2=normalizado)", type=["xlsx"], key="tem_up_v6_1")
-    exc_up = st.file_uploader("Términos a excluir (.xlsx, col1)", type=["xlsx"], key="exc_up_v6_1")
+    tem_up = st.file_uploader("Temáticas (.xlsx, col1=término, col2=normalizado)", type=["xlsx"], key="tem_up_v7_0")
+    exc_up = st.file_uploader("Términos a excluir (.xlsx, col1)", type=["xlsx"], key="exc_up_v7_0")
 
     if tem_up is not None:
         df = read_excel_from_bytes(tem_up, "Temáticas")
@@ -240,31 +297,64 @@ with st.sidebar:
         st.success(f"Términos a excluir cargados: {len(ss.excluir_df)}")
 
     st.markdown("---")
-    colm = st.columns(2)
-    with colm[0]:
-        if st.button("🧠 Usar en memoria"):
-            st.toast("Listo. Trabajarás con las bases cargadas en memoria.")
-    with colm[1]:
-        if st.button("🧹 Liberar memoria"):
-            for k in ("df_digital","df_fisica","tematicas_df","excluir_df","results_df","bitacora_df"):
-                ss[k] = None
-            ss.loaded_from_web = False
-            st.experimental_rerun()
+    # Nueva búsqueda que mantiene en memoria las bases oficiales/locales pero limpia lo demás
+    if st.button("🆕 Nueva búsqueda (mantener bases en memoria)", use_container_width=True):
+        for k in ("tematicas_df","excluir_df","results_df","bitacora_df"):
+            ss[k] = None
+        st.toast("Listo. Puedes cargar nuevas Temáticas y Términos a excluir para una nueva búsqueda.")
+        st.experimental_rerun()
 
-# ---------- BANNER DE TRABAJO ----------
+    # En vez de “Liberar memoria”, mostramos una nota clara
+    st.info("ℹ️ Si **cierras** o **recargas** la página del navegador, la herramienta se reinicia y se borran los datos de esta sesión.", icon="💡")
+
+# =============== BANNER DE TRABAJO Y AUTODESCARGA INICIAL ===============
 if ss.busy_msg:
     st.info(f"**{ss.busy_msg}** — por favor espera. No cierres esta ventana.", icon="⏳")
 
-# ---------- CABECERA ----------
+# Autodescarga al iniciar por primera vez (mientras el usuario puede adjuntar plantillas)
+if not ss.auto_started and ss.df_digital is None and ss.df_fisica is None:
+    ss.auto_started = True
+    st.info("Obteniendo las bases **desde la web oficial** por primera vez. Esto puede tardar **4–5 minutos**. "
+            "Mientras tanto, puedes ir cargando las **Temáticas** y los **Términos a excluir** en la barra lateral.",
+            icon="🌐")
+    try:
+        # Digital
+        ss.busy_msg = "Descargando base Digital…"
+        ss.downloading_digital = True
+        bio_d = download_with_resume(URL_DIGITAL, "Colección Digital")
+        ss.busy_msg = "Procesando base Digital…"
+        ss.processing_digital = True
+        ss.df_digital = read_excel_from_bytes(bio_d, "base Digital")
+        # Física
+        ss.busy_msg = "Descargando base Física…"
+        ss.downloading_fisica = True
+        bio_f = download_with_resume(URL_FISICA, "Colección Física")
+        ss.busy_msg = "Procesando base Física…"
+        ss.processing_fisica = True
+        ss.df_fisica = read_excel_from_bytes(bio_f, "base Física")
+
+        ss.loaded_from_web = True
+        st.success("✅ Bases Digital y Física **cargadas en memoria** desde la web oficial. ¡Listo para cargar Temáticas y Excluir!")
+    except Exception as e:
+        st.error(f"No se pudo completar la autodescarga: {e}")
+    finally:
+        ss.downloading_digital = False
+        ss.processing_digital = False
+        ss.downloading_fisica  = False
+        ss.processing_fisica   = False
+        ss.busy_msg = ""
+
+# =============== CABECERA / MENSAJE ORIENTADOR ===============
 st.title("Herramienta para la elaboración de bibliografías especializadas")
 st.markdown(
     f"""
-<div style="padding:12px;border-radius:8px;background:#0f172a;">
-<ul>
-<li>Requiere la <b>última versión</b> de las bases Digital y Física (puedes cargarlas desde la web oficial con los botones en la barra lateral).</li>
-<li>Plantillas: <a href="{URL_PLANTILLA_TEMATICAS}">Temáticas</a> y <a href="{URL_PLANTILLA_EXCLUSION}">Términos a excluir</a>.</li>
-<li><b>No dejes filas en blanco</b> en estas plantillas. La herramienta <b>no elimina</b> resultados: sólo resalta términos a excluir en el Excel exportado.</li>
-<li>Este proceso puede tardar algunos minutos; <b>puedes seguir usando tu equipo</b> (no cierres el navegador ni la consola).</li>
+<div class="theme-panel">
+<ul style="margin-bottom:0">
+<li>Objetivo: permitir la autogestión de bibliografías especializadas por programa/asignatura/tema y resaltar términos a excluir para depuración manual.</li>
+<li>Usa siempre las bases oficiales (Digital/Física) desde la barra lateral para consultar la versión más reciente.</li>
+<li>Plantillas: <a href="{URL_PLANTILLA_TEMATICAS}">Temáticas</a> y <a href="{URL_PLANTILLA_EXCLUSION}">Términos a excluir</a>. No dejes filas en blanco.</li>
+<li>Los archivos adjuntos **no se almacenan** por la Universidad y se eliminan al cerrar la app.</li>
+<li>El proceso puede tardar algunos minutos; puedes seguir usando tu equipo (no cierres el navegador).</li>
 </ul>
 </div>
 """,
@@ -272,18 +362,18 @@ st.markdown(
 )
 
 if ss.loaded_from_web:
-    st.info("Trabajando con bases **en memoria** descargadas desde la **web oficial**. (Pulsa “Liberar memoria” para empezar de nuevo).")
+    st.success("Trabajando con bases **en memoria** descargadas desde la **web oficial** (botones oficiales deshabilitados).")
 
-# Requisitos
+# Requisitos: bases y plantillas
 if ss.df_digital is None or ss.df_fisica is None:
-    st.warning("Carga las bases **Digital** y **Física** para continuar.")
+    st.info("Cargando las bases desde la web oficial… o usa la barra lateral para subir archivos manualmente.")
     st.stop()
 
 if ss.tematicas_df is None or ss.excluir_df is None:
-    st.error("Debes cargar **Temáticas** y **Términos a excluir** (en la barra lateral) antes de buscar.")
+    st.info("✅ Bases cargadas. Ahora, por favor **carga las Temáticas y los Términos a excluir** en la barra lateral para continuar.")
     st.stop()
 
-# ---------- CONFIGURACIÓN ----------
+# =============== CONFIGURACIÓN DE BÚSQUEDA/DUPLICADOS ===============
 st.subheader("Configuración de búsqueda y duplicados")
 
 cols_dig = list(ss.df_digital.columns)
@@ -306,7 +396,7 @@ with c4:
 
 st.caption("Por defecto la búsqueda se realiza en “Título” y “Temáticas”. Puedes elegir otras dos columnas si lo necesitas.")
 
-# ---------- BÚSQUEDA ----------
+# =============== BÚSQUEDA ===============
 st.markdown("---")
 if st.button("🚀 Iniciar búsqueda", type="primary"):
     excluye = [str(x).strip() for x in ss.excluir_df["excluir"].tolist() if str(x).strip()!=""]
@@ -358,7 +448,7 @@ if st.button("🚀 Iniciar búsqueda", type="primary"):
 
     total = len(ss.tematicas_df) * 2
     res_d = buscar(DF_D, "Digital", total, 0)
-    res_f = buscar(DF_F, "Física",  total, len(ss.tematicas_df))
+    res_f = buscar(DF_F,  "Física",  total, len(ss.tematicas_df))
 
     if not res_d.empty and col_dup_dig in res_d.columns:
         res_d = res_d.drop_duplicates(subset=[col_dup_dig], keep="first")
@@ -367,10 +457,10 @@ if st.button("🚀 Iniciar búsqueda", type="primary"):
 
     res = pd.concat([res_d, res_f], ignore_index=True) if not (res_d.empty and res_f.empty) else pd.DataFrame()
 
-    # Guardamos resultados en estado para persistir tras reruns
+    # Persistir resultados
     ss.results_df = res
 
-    # --- Bitácora con ceros ---
+    # Bitácora con ceros
     tem = ss.tematicas_df[["termino","normalizado"]].drop_duplicates().reset_index(drop=True)
     fuentes = pd.DataFrame({"Fuente":["Digital","Física"]})
     grid = fuentes.assign(key=1).merge(tem.assign(key=1), on="key").drop("key", axis=1)
@@ -396,14 +486,13 @@ if st.button("🚀 Iniciar búsqueda", type="primary"):
     estado.empty()
     st.success("Búsqueda finalizada.")
 
-# ---------- MOSTRAR RESULTADOS (persistentes) ----------
+# =============== RESULTADOS (persistentes) ===============
 st.subheader("Resultados")
 if ss.results_df is None or ss.results_df.empty:
     st.info("Aún no hay resultados. Ejecuta la búsqueda.")
 else:
     res = ss.results_df
 
-    # Control de filas visibles en pantalla (el Excel siempre va con todo)
     col_a, col_b = st.columns([1,1])
     with col_a:
         show_all = st.checkbox("Mostrar todas las filas", value=False)
@@ -415,7 +504,7 @@ else:
     else:
         st.dataframe(res.head(int(limit)), use_container_width=True, height=560)
 
-    # CSV completo
+    # CSV completo (sin colores, como siempre)
     st.download_button(
         "⬇️ Descargar CSV (todos los resultados)",
         data=res.fillna("").to_csv(index=False).encode("utf-8"),
@@ -462,7 +551,7 @@ else:
     else:
         st.info("Carga un “Listado de términos a excluir” para obtener el Excel con resaltado amarillo.")
 
-# ---------- BITÁCORA EN PANTALLA (con ceros) ----------
+# =============== BITÁCORA EN PANTALLA (con ceros) ===============
 st.subheader("📑 Bitácora por término")
 if ss.bitacora_df is None or ss.bitacora_df.empty:
     st.info("Aún no hay bitácora. Ejecuta la búsqueda.")
