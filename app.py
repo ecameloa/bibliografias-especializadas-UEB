@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v7.4 – Auto-carga robusta, UI estable, defaults correctos y pipeline v6.1 intacto
+# v7.4.1 – sin botones de memoria + auto-carga estable en Cloud
 
 import io
 import os
@@ -22,7 +22,7 @@ URL_FISICA  = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-B
 URL_PLANTILLA_TEMATICAS = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20Tem%C3%A1ticas.xlsx"
 URL_PLANTILLA_EXCLUSION = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20T%C3%A9rminos%20a%20excluir.xlsx"
 
-# Columnas por defecto (mismas de tu app v6.1)
+# Columnas por defecto (las mismas que funcionaban)
 DEFAULT_COL_TITULO    = "Título"
 DEFAULT_COL_TEMATICAS = "Temáticas"
 DEFAULT_DUP_DIGITAL   = "Url OA"
@@ -32,24 +32,20 @@ UA = {"User-Agent": "Mozilla/5.0"}
 
 # ============ ESTADO ============
 ss = st.session_state
-
-# bases y auxiliares
-ss.setdefault("df_digital", None)
-ss.setdefault("df_fisica", None)
-ss.setdefault("tematicas_df", None)
-ss.setdefault("excluir_df", None)
-
-# banderas de flujo
-ss.setdefault("auto_started", False)      # dispara una sola vez la auto-carga
-ss.setdefault("loading_digital", False)
-ss.setdefault("loading_fisica", False)
-ss.setdefault("processing_digital", False)
-ss.setdefault("processing_fisica", False)
-ss.setdefault("busy_msg", "")
-
-# resultados persistentes
-ss.setdefault("results_df", None)
-ss.setdefault("bitacora_df", None)
+for k, v in {
+    "df_digital": None,
+    "df_fisica": None,
+    "tematicas_df": None,
+    "excluir_df": None,
+    "auto_started": False,
+    "loading_digital": False,
+    "loading_fisica": False,
+    "processing_digital": False,
+    "processing_fisica": False,
+    "results_df": None,
+    "bitacora_df": None,
+}.items():
+    ss.setdefault(k, v)
 
 # ============ UTILIDADES ============
 def normalize_text(s):
@@ -61,7 +57,7 @@ def normalize_text(s):
              .replace("\u2019","'")
              .replace("\xa0"," "))
 
-def _head_content_length(url, timeout=30):
+def _head_content_length(url, timeout=20):
     try:
         r = requests.head(url, allow_redirects=True, timeout=timeout, headers=UA)
         r.raise_for_status()
@@ -70,8 +66,8 @@ def _head_content_length(url, timeout=30):
     except Exception:
         return None
 
-def download_with_resume(url, label, max_retries=6, chunk_size=256*1024, timeout=300, container=None):
-    """Descarga robusta con reintentos y progreso en pantalla."""
+def download_with_resume(url, label, max_retries=6, chunk_size=256*1024, timeout=120, container=None):
+    """Descarga robusta con reintentos y progreso."""
     where = container if container is not None else st
     status = where.empty()
     bar    = where.progress(0)
@@ -99,7 +95,6 @@ def download_with_resume(url, label, max_retries=6, chunk_size=256*1024, timeout
 
             with requests.get(url, stream=True, headers=headers, timeout=timeout, allow_redirects=True) as r:
                 if headers.get("Range") and r.status_code == 200:
-                    # servidor ignora Range -> reiniciar
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
                     downloaded = 0
@@ -117,15 +112,14 @@ def download_with_resume(url, label, max_retries=6, chunk_size=256*1024, timeout
                         f.write(chunk)
                         downloaded += len(chunk)
 
-                        if expected_total:
-                            if time.time() - last > 0.1:
-                                bar.progress(min(1.0, downloaded/expected_total))
-                                mb = downloaded/1e6
-                                if expected_total:
-                                    info.write(f"{mb:,.1f} MB / {expected_total/1e6:,.1f} MB")
-                                else:
-                                    info.write(f"{mb:,.1f} MB")
-                                last = time.time()
+                        if expected_total and (time.time() - last) > 0.15:
+                            bar.progress(min(1.0, downloaded/expected_total))
+                            mb = downloaded/1e6
+                            if expected_total:
+                                info.write(f"{mb:,.1f} MB / {expected_total/1e6:,.1f} MB")
+                            else:
+                                info.write(f"{mb:,.1f} MB")
+                            last = time.time()
 
             if total_size and downloaded < total_size:
                 raise requests.exceptions.ChunkedEncodingError(
@@ -168,14 +162,11 @@ def _safe_index(names, target):
 with st.sidebar:
     st.image(LOGO_URL, use_container_width=True)
     st.caption("Biblioteca Juan Roa Vásquez")
-
     st.markdown("### Plantillas oficiales:")
     st.markdown(f"- [Temáticas]({URL_PLANTILLA_TEMATICAS})")
     st.markdown(f"- [Términos a excluir]({URL_PLANTILLA_EXCLUSION})")
 
     st.markdown("### Archivos auxiliares (obligatorios)")
-    # OJO: estos se muestran SOLO cuando las bases oficiales ya están en memoria;
-    # antes se mostraba y se perdían si aún descargaba. Evitamos esa mala UX.
     tem_container = st.container()
     exc_container = st.container()
 
@@ -189,19 +180,6 @@ with st.sidebar:
         if up_fis is not None:
             ss.df_fisica = read_excel_from_bytes(up_fis, "base Física (manual)")
             st.success("Base de datos de la colección Física cargada (manual).")
-
-    st.markdown("---")
-    cols = st.columns(2)
-    with cols[0]:
-        if st.button("🧠 Usar en memoria", help="Trabajar con las bases que ya estén cargadas en esta sesión."):
-            st.toast("Listo. Trabajarás con las bases en memoria.")
-    with cols[1]:
-        if st.button("🧹 Liberar memoria", help="Reinicia la sesión y elimina bases y resultados."):
-            for k in ("df_digital","df_fisica","tematicas_df","excluir_df","results_df","bitacora_df",
-                      "auto_started","busy_msg","loading_digital","loading_fisica",
-                      "processing_digital","processing_fisica"):
-                ss[k] = None if k.endswith("_df") or k in ("results_df","bitacora_df") else False
-            st.experimental_rerun()
 
 # ============ CABECERA ============
 st.markdown(
@@ -222,14 +200,13 @@ st.markdown(
 )
 
 # ============ AUTO-CARGA (una sola vez) ============
-# Disparamos la descarga automática solo la primera vez que entra la sesión
 if not ss.auto_started and (ss.df_digital is None or ss.df_fisica is None):
     ss.auto_started = True
     st.info("Cargando las bases Digital y Física desde la web oficial… Puedes continuar leyendo las instrucciones.")
+
     # Digital
     try:
         ss.loading_digital = True
-        st.status("Descargando base de datos de la colección Digital…").update(label="Descargando base de datos de la colección Digital…", state="running")
         bio = download_with_resume(URL_DIGITAL, "Colección Digital", container=st)
         ss.processing_digital = True
         ss.df_digital = read_excel_from_bytes(bio, "base de datos de la colección Digital")
@@ -240,7 +217,6 @@ if not ss.auto_started and (ss.df_digital is None or ss.df_fisica is None):
     # Física
     try:
         ss.loading_fisica = True
-        st.status("Descargando base de datos de la colección Física…").update(label="Descargando base de datos de la colección Física…", state="running")
         bio = download_with_resume(URL_FISICA, "Colección Física", container=st)
         ss.processing_fisica = True
         ss.df_fisica = read_excel_from_bytes(bio, "base de datos de la colección Física")
@@ -248,7 +224,7 @@ if not ss.auto_started and (ss.df_digital is None or ss.df_fisica is None):
         ss.loading_fisica = False
         ss.processing_fisica = False
 
-# Indicadores de estado de las bases
+# Indicadores
 ok_dig = ss.df_digital is not None
 ok_fis = ss.df_fisica is not None
 
@@ -261,7 +237,7 @@ else:
     st.info(f"Base de datos de la colección Digital: **{dig_txt}**  •  "
             f"Base de datos de la colección Física: **{fis_txt}**")
 
-# Si aún no están listas, no mostramos los upload de temáticas/excluir (evita que se pierdan).
+# Mostrar uploads solo cuando ambas estén listas (evita que se “pierdan”).
 if ok_dig and ok_fis:
     with st.sidebar:
         with tem_container:
@@ -282,16 +258,14 @@ if ok_dig and ok_fis:
                 st.success(f"Términos a excluir cargados: {len(ss.excluir_df)}")
 else:
     st.warning("Descargando/Procesando bases oficiales… al terminar podrás cargar Temáticas y Términos a excluir.")
-
-# Requisitos mínimos para continuar
-if not ok_dig or not ok_fis:
     st.stop()
 
+# Requisitos mínimos
 if ss.tematicas_df is None or ss.excluir_df is None:
     st.error("Debes cargar **Temáticas** y **Términos a excluir** (en la barra lateral) antes de buscar.")
     st.stop()
 
-# ============ CONFIGURACIÓN DE BÚSQUEDA ============
+# ============ CONFIGURACIÓN ============
 st.subheader("Configuración de búsqueda y duplicados")
 
 cols_dig = list(ss.df_digital.columns)
@@ -314,7 +288,7 @@ with c4:
 
 st.caption("Por defecto la búsqueda se realiza en “Título” y “Temáticas”. Puedes elegir otras dos columnas si lo necesitas.")
 
-# ============ BÚSQUEDA (pipeline v6.1 íntegro) ============
+# ============ BÚSQUEDA (pipeline intacto) ============
 st.markdown("---")
 if st.button("🚀 Iniciar búsqueda", type="primary"):
     excluye = [str(x).strip() for x in ss.excluir_df["excluir"].tolist() if str(x).strip()!=""]
@@ -353,12 +327,14 @@ if st.button("🚀 Iniciar búsqueda", type="primary"):
                     md["Fuente"] = fuente
                     res.append(md)
 
-            frac = (i + 1) / N
+            frac = (i + 1) / max(N, 1)
             elapsed = time.time() - t0
             est_total = elapsed / max(frac, 1e-6)
             est_rem = max(0, int(est_total - elapsed))
-            barra.progress(min(1.0, (offset + i + 1) / total_steps))
-            estado.info(f"{fuente}: normalizando/buscando {i+1}/{N} • transcurrido: {int(elapsed)} s • restante: {est_rem} s")
+            # actualizar cada ~0.1s para no bloquear
+            if (i % 2) == 0:
+                barra.progress(min(1.0, (offset + i + 1) / total_steps))
+                estado.info(f"{fuente}: normalizando/buscando {i+1}/{N} • transcurrido: {int(elapsed)} s • restante: {est_rem} s")
 
         if res:
             return pd.concat(res, ignore_index=True)
@@ -374,11 +350,9 @@ if st.button("🚀 Iniciar búsqueda", type="primary"):
         res_f = res_f.drop_duplicates(subset=[col_dup_fis], keep="first")
 
     res = pd.concat([res_d, res_f], ignore_index=True) if not (res_d.empty and res_f.empty) else pd.DataFrame()
-
-    # Guardamos resultados en estado para persistencia
     ss.results_df = res
 
-    # --- Bitácora con ceros (v6.1) ---
+    # Bitácora con ceros
     tem = ss.tematicas_df[["termino","normalizado"]].drop_duplicates().reset_index(drop=True)
     fuentes = pd.DataFrame({"Fuente":["Digital","Física"]})
     grid = fuentes.assign(key=1).merge(tem.assign(key=1), on="key").drop("key", axis=1)
@@ -411,7 +385,6 @@ if ss.results_df is None or ss.results_df.empty:
 else:
     res = ss.results_df
 
-    # Control de filas visibles (el Excel siempre exporta todo)
     col_a, col_b = st.columns([1,1])
     with col_a:
         show_all = st.checkbox("Mostrar todas las filas", value=False)
@@ -423,7 +396,6 @@ else:
     else:
         st.dataframe(res.head(int(limit)), use_container_width=True, height=560)
 
-    # CSV completo
     st.download_button(
         "⬇️ Descargar CSV (todos los resultados)",
         data=res.fillna("").to_csv(index=False).encode("utf-8"),
@@ -431,7 +403,6 @@ else:
         mime="text/csv"
     )
 
-    # Excel con resaltado + bitácora (misma lógica v6.1)
     excluye = [str(x).strip() for x in ss.excluir_df["excluir"].tolist() if str(x).strip()!=""]
     if excluye:
         import xlsxwriter
@@ -456,7 +427,6 @@ else:
                 if any(t in v for t in excl_norm):
                     ws.write(r, col_tem-1, res.iloc[r-1, col_tem-1], fmt)
 
-        # Hoja Bitácora (con ceros)
         if ss.bitacora_df is not None:
             ss.bitacora_df.to_excel(writer, index=False, sheet_name="Bitácora")
 
