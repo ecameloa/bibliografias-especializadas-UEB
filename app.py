@@ -1,26 +1,24 @@
 # -*- coding: utf-8 -*-
-# v7.3.2 – carga con progreso, estado “procesando”, y uploads protegidos
+# v7.3.3 – fix: hoja por defecto (sheet=0), UI chips, renombres y robustez de columnas
 import io
 import time
-import zipfile
 import requests
 import pandas as pd
-import numpy as np
 import streamlit as st
 from unidecode import unidecode
 
-# ========= Ajustes generales =========
+# ================== Ajustes generales ==================
 st.set_page_config(
     page_title="Herramienta para la elaboración de bibliografías",
     page_icon="📚",
     layout="wide",
 )
 
-# URLs oficiales (ajústalas si cambian)
+# URLs oficiales
 URL_DIGITAL = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20Colecci%C3%B3n%20Digital.xlsx"
 URL_FISICA  = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20BD%20Colecci%C3%B3n%20F%C3%ADsica.xlsx"
 
-# ========= Estado inicial =========
+# ================== Estado ==================
 def _init_state():
     ss = st.session_state
     ss.setdefault("digital_ok", False)
@@ -29,34 +27,41 @@ def _init_state():
     ss.setdefault("fisica_loading", False)
     ss.setdefault("df_digital", None)
     ss.setdefault("df_fisica", None)
-
-    # uploads protegidos en memoria (bytes), para no perderlos en reruns
     ss.setdefault("tematicas_bytes", None)
     ss.setdefault("excluir_bytes", None)
-
-    # si quieres que la descarga automática sólo se dispare 1 vez
     ss.setdefault("auto_kickoff", False)
-
 _init_state()
 
-# ========= Utilidades =========
-@st.cache_data(ttl=60 * 60, max_entries=2, show_spinner=False)
-def _read_excel_from_bytes(b: bytes, sheet: str | None = None) -> pd.DataFrame:
+# ================== Helpers ==================
+def info_box(title: str, body: str):
+    st.markdown(
+        f"""
+        <div style="
+          background:#0d2840;
+          border:1px solid #164a72;
+          color:#cfe8ff;
+          padding:14px 16px;
+          border-radius:8px;">
+          <b>{title}</b><br>{body}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def read_excel_from_bytes(b: bytes, sheet=0) -> pd.DataFrame:
+    """Lee SIEMPRE la primera hoja (sheet=0) → devuelve DataFrame."""
     return pd.read_excel(io.BytesIO(b), sheet_name=sheet)
 
-@st.cache_data(ttl=60 * 60, max_entries=2, show_spinner=False)
-def _read_excel_from_url(all_bytes: bytes, sheet: str | None = None) -> pd.DataFrame:
-    # función “tonta” que sólo usa cache_data para bytes ya descargados
-    return pd.read_excel(io.BytesIO(all_bytes), sheet_name=sheet)
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def read_excel_from_url_bytes(b: bytes, sheet=0) -> pd.DataFrame:
+    return pd.read_excel(io.BytesIO(b), sheet_name=sheet)
 
-def _stream_download(url: str, status_label: st.delta_generator.DeltaGenerator, bar: st.progress) -> bytes:
-    """
-    Descarga stream con progreso. Devuelve los bytes del archivo.
-    """
+def stream_download(url: str, status_area: st.delta_generator.DeltaGenerator, bar: st.progress) -> bytes:
     with requests.get(url, stream=True, timeout=30) as r:
         r.raise_for_status()
         total = int(r.headers.get("Content-Length", 0)) or None
-        chunk = 1024 * 512  # 512 KB
+        chunk = 1024 * 512
         got = 0
         buf = io.BytesIO()
         for part in r.iter_content(chunk_size=chunk):
@@ -64,26 +69,10 @@ def _stream_download(url: str, status_label: st.delta_generator.DeltaGenerator, 
             got += len(part)
             if total:
                 bar.progress(min(1.0, got / total))
-        status_label.write("Descarga completa. Verificando archivo…")
+        status_area.write("Descarga completa. Verificando archivo…")
         return buf.getvalue()
 
-def _as_text_info_box(title: str, body: str):
-    st.markdown(
-        f"""
-        <div style="
-            background:#0d2840;
-            border:1px solid #164a72;
-            color:#cfe8ff;
-            padding:14px 16px;
-            border-radius:8px;
-            ">
-            <b>{title}</b><br>{body}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-# ========= Sidebar =========
+# ================== Sidebar ==================
 with st.sidebar:
     st.image(
         "https://biblioteca.unbosque.edu.co/sites/default/files/Logos/Logo%201%20Blanco.png",
@@ -95,59 +84,40 @@ with st.sidebar:
     st.markdown("- [Términos a excluir](https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20T%C3%A9rminos%20a%20excluir.xlsx)")
 
     st.markdown("### Archivos auxiliares (obligatorios)")
-    tem_col, btn_col = st.columns([0.8, 0.2])
-    with tem_col:
-        tem_file = st.file_uploader(
-            "Temáticas (.xlsx, col1=término, col2=normalizado)",
-            type=["xlsx"],
-            disabled=not (st.session_state.digital_ok and st.session_state.fisica_ok),
-            key="tematicas_upl",
-        )
-    with btn_col:
-        st.write("")  # spacing
-        if st.session_state.tematicas_bytes:
-            st.success("Temáticas OK", icon="✅")
-        else:
-            st.info("Pendiente", icon="📝")
+    bases_listas = st.session_state.digital_ok and st.session_state.fisica_ok
 
-    ex_col, btn2_col = st.columns([0.8, 0.2])
-    with ex_col:
-        ex_file = st.file_uploader(
-            "Términos a excluir (.xlsx, 1ra columna)",
-            type=["xlsx"],
-            disabled=not (st.session_state.digital_ok and st.session_state.fisica_ok),
-            key="excluir_upl",
-        )
-    with btn2_col:
-        st.write("")
-        if st.session_state.excluir_bytes:
-            st.success("Excluidos OK", icon="✅")
-        else:
-            st.info("Pendiente", icon="📝")
+    tem_file = st.file_uploader(
+        "Temáticas (.xlsx, col1=término, col2=normalizado)",
+        type=["xlsx"],
+        disabled=not bases_listas,
+        key="tematicas_upl",
+    )
+    if tem_file is not None:
+        st.session_state.tematicas_bytes = tem_file.read()
+    st.caption("✅ Temáticas cargadas" if st.session_state.tematicas_bytes else "📝 Pendiente")
+
+    ex_file = st.file_uploader(
+        "Términos a excluir (.xlsx, 1ra columna)",
+        type=["xlsx"],
+        disabled=not bases_listas,
+        key="excluir_upl",
+    )
+    if ex_file is not None:
+        st.session_state.excluir_bytes = ex_file.read()
+    st.caption("✅ Términos a excluir cargados" if st.session_state.excluir_bytes else "📝 Pendiente")
 
     st.divider()
-    with st.expander("⚙️ Avanzado: subir bases Digital/Física manualmente"):
+    with st.expander("⚙️ Avanzado: subir **bases** Digital/Física manualmente"):
         st.caption(
             "Por defecto se usan las **bases oficiales** descargadas automáticamente. "
-            "Subir manualmente una base reemplaza **sólo en esta sesión**."
+            "Si subes manualmente, reemplaza **sólo en esta sesión**."
         )
-        man_dig = st.file_uploader("Reemplazar base **Digital** (.xlsx)", type=["xlsx"], key="dig_manual")
-        man_fis = st.file_uploader("Reemplazar base **Física** (.xlsx)", type=["xlsx"], key="fis_manual")
+        up_dig = st.file_uploader("Reemplazar **Base de datos de la colección Digital** (.xlsx)", type=["xlsx"], key="dig_manual")
+        up_fis = st.file_uploader("Reemplazar **Base de datos de la colección Física** (.xlsx)", type=["xlsx"], key="fis_manual")
 
-# Guardar/retener uploads en memoria para que no se pierdan en los reruns
-if tem_file is not None:
-    st.session_state.tematicas_bytes = tem_file.read()
-if ex_file is not None:
-    st.session_state.excluir_bytes = ex_file.read()
-
-# ========= Encabezado principal =========
-st.markdown(
-    """
-    # Herramienta para la elaboración de bibliografías
-    """
-)
-
-_info = (
+# ================== Encabezado ==================
+st.markdown("# Herramienta para la elaboración de bibliografías")
+info = (
     "Objetivo: autogestión por programa/asignatura/tema y resaltado de **términos a excluir** para depuración manual. "
     "Usa siempre las bases oficiales (Digital/Física) o súbelas **manualmente** en la barra lateral. "
     "Plantillas: [Temáticas](https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20Tem%C3%A1ticas.xlsx) "
@@ -155,137 +125,145 @@ _info = (
     "Los archivos adjuntos **no se almacenan** por la Universidad y se eliminan al cerrar la app. "
     "El proceso puede tardar algunos minutos; puedes seguir usando tu equipo."
 )
-_as_text_info_box("ℹ️ Información", _info)
+info_box("ℹ️ Información", info)
 
-# ========= Descarga/lectura de Digital y Física =========
-# Estado visual permanente + spinner de “procesando”
-card = st.container(border=True)
-with card:
+# ================== Panel de estado ==================
+panel = st.container(border=True)
+with panel:
     st.subheader("Bases oficiales cargadas en memoria (sesión)")
-    place_status = st.empty()      # muestra línea “Cargando…”
-    place_prog_d = st.progress(0)  # progreso Digital
-    place_prog_f = st.progress(0)  # progreso Física
+    place_status = st.empty()
+    pb_d = st.progress(0, text="Base de datos de la colección Digital")
+    pb_f = st.progress(0, text="Base de datos de la colección Física")
 
-# Mensaje “gif-like” durante la carga
-if not (st.session_state.digital_ok and st.session_state.fisica_ok):
-    place_status.info(
-        "Cargando las bases Digital y Física desde la web oficial… (no cierres esta ventana).",
-        icon="⏳",
-    )
-else:
-    place_status.success("Bases oficiales listas en memoria.", icon="✅")
-
-def _load_digital_official():
+# ================== Lectura de bases (oficial / manual) ==================
+def load_official_digital():
     st.session_state.digital_loading = True
-    with st.status("Descargando **Base Digital**…", expanded=True) as s:
+    with st.status("Descargando **Base de datos de la colección Digital**…", expanded=True) as s:
         txt = st.empty()
         bar = st.progress(0)
         try:
-            b = _stream_download(URL_DIGITAL, txt, bar)
-            df = _read_excel_from_url(b)
+            b = stream_download(URL_DIGITAL, txt, bar)
+            df = read_excel_from_url_bytes(b, sheet=0)  # <-- DataFrame
             st.session_state.df_digital = df
             st.session_state.digital_ok = True
-            place_prog_d.progress(1.0)
-            s.update(label="Base Digital lista ✔️", state="complete")
+            pb_d.progress(1.0, text="Base de datos de la colección Digital (100%)")
+            s.update(label="Base de datos de la colección Digital lista ✔️", state="complete")
         except Exception as e:
             s.update(label=f"Error en Digital: {e}", state="error")
             st.session_state.digital_ok = False
     st.session_state.digital_loading = False
 
-def _load_fisica_official():
+def load_official_fisica():
     st.session_state.fisica_loading = True
-    with st.status("Descargando **Base Física**…", expanded=True) as s:
+    with st.status("Descargando **Base de datos de la colección Física**…", expanded=True) as s:
         txt = st.empty()
         bar = st.progress(0)
         try:
-            b = _stream_download(URL_FISICA, txt, bar)
-            df = _read_excel_from_url(b)
+            b = stream_download(URL_FISICA, txt, bar)
+            df = read_excel_from_url_bytes(b, sheet=0)  # <-- DataFrame
             st.session_state.df_fisica = df
             st.session_state.fisica_ok = True
-            place_prog_f.progress(1.0)
-            s.update(label="Base Física lista ✔️", state="complete")
+            pb_f.progress(1.0, text="Base de datos de la colección Física (100%)")
+            s.update(label="Base de datos de la colección Física lista ✔️", state="complete")
         except Exception as e:
             s.update(label=f"Error en Física: {e}", state="error")
             st.session_state.fisica_ok = False
     st.session_state.fisica_loading = False
 
-# Si suben manualmente, prioriza esas bases
+# reemplazos manuales (si los hay)
 if st.session_state.get("dig_manual") is not None:
     try:
-        df_dig = _read_excel_from_bytes(st.session_state.dig_manual.read())
-        st.session_state.df_digital = df_dig
+        df_man = read_excel_from_bytes(st.session_state.dig_manual.read(), sheet=0)
+        st.session_state.df_digital = df_man
         st.session_state.digital_ok = True
-        place_prog_d.progress(1.0)
+        pb_d.progress(1.0, text="Base de datos de la colección Digital (manual)")
     except Exception as e:
         st.warning(f"No se pudo leer la base Digital manual: {e}")
 
 if st.session_state.get("fis_manual") is not None:
     try:
-        df_fis = _read_excel_from_bytes(st.session_state.fis_manual.read())
-        st.session_state.df_fisica = df_fis
+        df_man = read_excel_from_bytes(st.session_state.fis_manual.read(), sheet=0)
+        st.session_state.df_fisica = df_man
         st.session_state.fisica_ok = True
-        place_prog_f.progress(1.0)
+        pb_f.progress(1.0, text="Base de datos de la colección Física (manual)")
     except Exception as e:
         st.warning(f"No se pudo leer la base Física manual: {e}")
 
-# Auto-carga oficial (una sola vez)
+# arranque automático (solo una vez)
 if not st.session_state.auto_kickoff:
     st.session_state.auto_kickoff = True
     if not st.session_state.digital_ok:
-        _load_digital_official()
+        load_official_digital()
     if not st.session_state.fisica_ok:
-        _load_fisica_official()
+        load_official_fisica()
 
-# Estado final
+# estado final del panel
 if st.session_state.digital_ok and st.session_state.fisica_ok:
     place_status.success("Bases oficiales listas en memoria.", icon="✅")
 else:
-    place_status.warning("Alguna base no se cargó correctamente.", icon="⚠️")
+    if st.session_state.digital_loading or st.session_state.fisica_loading:
+        place_status.info("Cargando bases desde la web oficial…", icon="⏳")
+    else:
+        place_status.warning("Alguna base no se cargó correctamente.", icon="⚠️")
 
-# ========= Habilitar uploads una vez que las bases están listas =========
+# deshabilitar uploaders hasta que ambas bases estén listas
 if not (st.session_state.digital_ok and st.session_state.fisica_ok):
-    st.info(
-        "Los cargadores de **Temáticas** y **Términos a excluir** se habilitan cuando las bases estén listas.",
-        icon="ℹ️",
-    )
+    st.info("Los cargadores de **Temáticas** y **Términos a excluir** se habilitan cuando las bases estén listas.", icon="ℹ️")
 
-# ========= A PARTIR DE AQUÍ: tu lógica original de búsqueda (sin cambios) =========
-# Usa st.session_state.df_digital / df_fisica como fuentes
-# Usa st.session_state.tematicas_bytes / excluir_bytes para construir DataFrames
-# (no se pierden con los reruns).
-# ---------------------------------------------------------------------
-# Ejemplo mínimo para no romper el flujo (reemplaza por tu lógica):
+# ================== Sección de búsqueda (integra tu lógica) ==================
 st.divider()
 st.subheader("Configuración de búsqueda y duplicados")
 
-if st.session_state.digital_ok and st.session_state.fisica_ok:
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        col_principal = st.selectbox("Búsqueda principal por:", ["Título", "Autores", "Temáticas"], index=0)
-    with col2:
-        col_comp = st.selectbox("Búsqueda complementaria por:", ["Temáticas", "Título", "Autores"], index=0)
-    with col3:
-        col_dup_dig = st.selectbox("Duplicados en Digital:", list(st.session_state.df_digital.columns), index=0)
-    with col4:
-        col_dup_fis = st.selectbox("Duplicados en Física:", list(st.session_state.df_fisica.columns), index=0)
+bases_listas = st.session_state.digital_ok and st.session_state.fisica_ok
+if bases_listas:
+    df_dig = st.session_state.df_digital
+    df_fis = st.session_state.df_fisica
 
-    st.caption("Consejo: por defecto la búsqueda se realiza en **Título** y **Temáticas**. Puedes elegir otras columnas si lo necesitas.")
-
-    # Botón de inicio (mantén el tuyo)
-    if st.button("🚀 Iniciar búsqueda", type="primary", use_container_width=True, disabled=not (st.session_state.tematicas_bytes and st.session_state.excluir_bytes)):
-        with st.status("Normalizando temáticas y procesando…", expanded=True) as s:
-            time.sleep(0.5)  # visual
+    # defensivo: si por alguna razón no son DataFrames, no pintar selectores
+    if isinstance(df_dig, pd.DataFrame) and isinstance(df_fis, pd.DataFrame):
+        cols1 = st.columns(4)
+        with cols1[0]:
+            col_principal = st.selectbox("Búsqueda principal por:", ["Título", "Autores", "Temáticas"], index=0)
+        with cols1[1]:
+            col_comp = st.selectbox("Búsqueda complementaria por:", ["Temáticas", "Título", "Autores"], index=0)
+        with cols1[2]:
             try:
-                df_tem = pd.read_excel(io.BytesIO(st.session_state.tematicas_bytes))
-                df_exc = pd.read_excel(io.BytesIO(st.session_state.excluir_bytes))
-                s.write(f"Temáticas cargadas: {len(df_tem)} | Excluir: {len(df_exc)}")
-                time.sleep(0.3)
-                # --- Aquí va tu pipeline de búsqueda existente ---
-                # resultados = tu_funcion_busqueda(...)
-                # st.dataframe(resultados, use_container_width=True)
-                s.update(label="Búsqueda finalizada ✔️", state="complete")
-                st.success("Búsqueda finalizada. (Integra aquí tu render de resultados / exportaciones)", icon="✅")
-            except Exception as e:
-                s.update(label=f"Error en normalización o búsqueda: {e}", state="error")
+                col_dup_dig = st.selectbox(
+                    "Columna de duplicados en **Colección Digital**",
+                    list(df_dig.columns),
+                    index=0
+                )
+            except Exception:
+                col_dup_dig = st.selectbox("Columna de duplicados en **Colección Digital**", ["(sin columnas)"])
+        with cols1[3]:
+            try:
+                col_dup_fis = st.selectbox(
+                    "Columna de duplicados en **Colección Física**",
+                    list(df_fis.columns),
+                    index=0
+                )
+            except Exception:
+                col_dup_fis = st.selectbox("Columna de duplicados en **Colección Física**", ["(sin columnas)"])
+
+        st.caption("Consejo: por defecto la búsqueda se realiza en **Título** y **Temáticas**. Puedes elegir otras columnas si lo necesitas.")
+
+        # Botón de inicio (se habilita solo si hay temáticas y excluidos)
+        listo_para_buscar = st.session_state.tematicas_bytes and st.session_state.excluir_bytes
+        if st.button("🚀 Iniciar búsqueda", type="primary", use_container_width=True, disabled=not listo_para_buscar):
+            with st.status("Normalizando temáticas y procesando…", expanded=True) as s:
+                try:
+                    df_tem = pd.read_excel(io.BytesIO(st.session_state.tematicas_bytes), sheet_name=0)
+                    df_exc = pd.read_excel(io.BytesIO(st.session_state.excluir_bytes), sheet_name=0)
+                    s.write(f"Temáticas cargadas: {len(df_tem)} | Términos a excluir: {len(df_exc)}")
+                    time.sleep(0.3)
+                    # >>>>>> aquí va tu pipeline de búsqueda original <<<<<<
+                    # resultados = tu_funcion_busqueda(...)
+                    # st.dataframe(resultados, use_container_width=True)
+                    s.update(label="Búsqueda finalizada ✔️", state="complete")
+                    st.success("Búsqueda finalizada. (Integra aquí tu render de resultados / exportaciones)", icon="✅")
+                except Exception as e:
+                    s.update(label=f"Error en normalización o búsqueda: {e}", state="error")
+    else:
+        st.warning("Las bases no se cargaron correctamente (no son DataFrame). Intenta recargar la página.", icon="⚠️")
 else:
     st.info("Esperando que las bases **Digital/Física** estén listas…", icon="⏳")
