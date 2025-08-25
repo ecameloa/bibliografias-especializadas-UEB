@@ -1,566 +1,529 @@
+st.sidebar.caption("Versión 7.1")
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v7.0 – Autodescarga inicial + indicadores persistentes + nueva búsqueda en memoria + UX y tema claro/oscuro (beta)
+# Universidad El Bosque
 
 import io
-import os
 import time
-import tempfile
+import math
 import requests
+import numpy as np
 import pandas as pd
 import streamlit as st
+from unidecode import unidecode
 
-# =============== CONFIG INICIAL ===============
-st.set_page_config(page_title="Herramienta de bibliografías", layout="wide")
+# =========================
+# CONFIGURACIÓN / CONSTANTES
+# =========================
 
-# Logos según tema
-LOGO_DARK = "https://biblioteca.unbosque.edu.co/sites/default/files/Logos/Logo%201%20Blanco.png"
-LOGO_LIGHT = "https://biblioteca.unbosque.edu.co/sites/default/files/Logos/Logo%201%20ORG.png"
+# URLs oficiales (Digital / Física)
+URL_DIGITAL = ("https://biblioteca.unbosque.edu.co/sites/default/files/"
+               "Formatos-Biblioteca/Biblioteca%20Colecci%C3%B3n%20Digital.xlsx")
+URL_FISICA = ("https://biblioteca.unbosque.edu.co/sites/default/files/"
+              "Formatos-Biblioteca/Biblioteca%20BD%20Colecci%C3%B3n%20F%C3%ADsica.xlsx")
 
-# URLs oficiales
-URL_DIGITAL = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20Colecci%C3%B3n%20Digital.xlsx"
-URL_FISICA  = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20BD%20Colecci%C3%B3n%20F%C3%ADsica.xlsx"
+# Logos (oscuro / claro)
+DARK_LOGO  = "https://biblioteca.unbosque.edu.co/sites/default/files/Logos/Logo%201%20Blanco.png"
+LIGHT_LOGO = "https://biblioteca.unbosque.edu.co/sites/default/files/Logos/Logo%201%20ORG.png"
 
-URL_PLANTILLA_TEMATICAS = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20Tem%C3%A1ticas.xlsx"
-URL_PLANTILLA_EXCLUSION = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20T%C3%A9rminos%20a%20excluir.xlsx"
+# Columnas sugeridas por defecto
+DEFAULT_SEARCH_COL1 = "Título"
+DEFAULT_SEARCH_COL2 = "Temáticas"
+DEFAULT_DUP_DIGITAL = "Url OA"
+DEFAULT_DUP_FISICA  = "No. Topográfico"
 
-# Columnas por defecto
-DEFAULT_COL_TITULO    = "Título"
-DEFAULT_COL_TEMATICAS = "Temáticas"
-DEFAULT_DUP_DIGITAL   = "Url OA"
-DEFAULT_DUP_FISICA    = "No. Topográfico"
+# =========================
+# CSS: mejoras de UI
+# =========================
+st.set_page_config(page_title="Herramienta para bibliografías especializadas", layout="wide")
 
-UA = {"User-Agent": "Mozilla/5.0"}
+st.markdown("""
+<style>
+/* Sidebar más ancho y estable */
+[data-testid="stSidebar"] {min-width: 340px; max-width: 420px;}
+/* Evitar recortes en notificaciones */
+[data-testid="stNotification"] p, [data-testid="stNotification"] div { white-space: normal !important; }
+/* Reducir padding vertical en sidebar para que quepa más info */
+section[data-testid="stSidebar"] div.block-container { padding-top: 1rem; }
+</style>
+""", unsafe_allow_html=True)
 
-# =============== ESTADO ===============
+# =========================
+# ESTADO
+# =========================
 ss = st.session_state
-
-# Datos principales y auxiliares
+ss.setdefault("tema", "dark")  # "dark" o "light"
+ss.setdefault("digital_loading", False)
+ss.setdefault("fisica_loading",  False)
+ss.setdefault("digital_ok", False)
+ss.setdefault("fisica_ok",  False)
 ss.setdefault("df_digital", None)
-ss.setdefault("df_fisica", None)
-ss.setdefault("tematicas_df", None)
-ss.setdefault("excluir_df", None)
+ss.setdefault("df_fisica",  None)
+ss.setdefault("tematicas_df", None)   # 2 columnas: termino, normalizado
+ss.setdefault("excluir_df",   None)   # 1 columna: termino_excluir
+ss.setdefault("df_resultados", None)
+ss.setdefault("bitacora", None)
 
-# Flags de dónde provienen y autodescarga
-ss.setdefault("loaded_from_web", False)
-ss.setdefault("auto_started", False)  # para autodescarga en primer arranque
+# ================ UTILIDADES ================
 
-# Flags de progreso/descarga/procesado
-ss.setdefault("downloading_digital", False)
-ss.setdefault("downloading_fisica", False)
-ss.setdefault("processing_digital", False)
-ss.setdefault("processing_fisica", False)
-ss.setdefault("busy_msg", "")
-
-# Resultados persistentes
-ss.setdefault("results_df", None)
-ss.setdefault("bitacora_df", None)
-
-# Preferencias de UI
-ss.setdefault("ui_theme", "Oscuro")  # Oscuro | Claro
-ss.setdefault("ask_switch_source", False)  # confirmación al cambiar fuente si ya hay oficiales
-
-# =============== UTILIDADES ===============
-def normalize_text(s):
-    if pd.isna(s):
+def normalize_txt(x: str) -> str:
+    if pd.isna(x):
         return ""
-    s = str(s)
-    return (s.replace("\u0301","")
-             .replace("\u0303","")
-             .replace("\u2019","'")
-             .replace("\xa0"," "))
+    x = str(x)
+    x = unidecode(x)  # elimina tildes
+    return x
 
-def _head_content_length(url, timeout=30):
-    try:
-        r = requests.head(url, allow_redirects=True, timeout=timeout, headers=UA)
-        r.raise_for_status()
-        cl = r.headers.get("Content-Length")
-        return int(cl) if cl is not None else None
-    except Exception:
-        return None
+def clear_for_new_search():
+    """Limpia resultados pero NO borra las bases grandes ya cargadas."""
+    for k in ["df_resultados", "bitacora", "tematicas_df", "excluir_df"]:
+        ss.pop(k, None)
+    st.success("Listo para una nueva búsqueda. Las bases oficiales se mantienen en memoria.")
 
-def download_with_resume(url, label, max_retries=6, chunk_size=256*1024, timeout=300, container=None):
-    where = container if container is not None else st
-    status = where.empty()
-    bar    = where.progress(0)
-    info   = where.empty()
+def _read_excel_from_bytes(b: io.BytesIO) -> pd.DataFrame:
+    b.seek(0)
+    # Deja que pandas detecte el engine (openpyxl instalado)
+    return pd.read_excel(b)
 
-    tmp_dir = tempfile.gettempdir()
-    tmp_path = os.path.join(tmp_dir, f"dl_{abs(hash(url))}.part")
-
-    total_size = _head_content_length(url)
+def download_excel_with_progress(url: str, label: str, retry: int = 2) -> pd.DataFrame:
+    """Descarga con barra de progreso por bytes, con reintentos."""
     attempt = 0
-
-    while attempt < max_retries:
-        attempt += 1
+    last_exc = None
+    while attempt <= retry:
         try:
-            downloaded = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
+            r = requests.get(url, stream=True, timeout=60)
+            r.raise_for_status()
+            total = int(r.headers.get("content-length", 0)) or None
 
-            headers = dict(UA)
-            if downloaded and total_size and downloaded < total_size:
-                headers["Range"] = f"bytes={downloaded}-"
-                mode = "ab"
-            else:
-                mode = "wb"
+            progress = st.progress(0, text=f"Descargando {label}…")
+            buf = io.BytesIO()
+            downloaded = 0
+            chunk_size = 1024 * 512  # 512 KB
 
-            status.info(f"Descargando {label}… (intento {attempt}/{max_retries})")
+            for chunk in r.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    buf.write(chunk)
+                    downloaded += len(chunk)
+                    if total:
+                        pct = int(downloaded / total * 100)
+                        progress.progress(min(pct, 100), text=f"{label}: {pct}%")
 
-            with requests.get(url, stream=True, headers=headers, timeout=timeout, allow_redirects=True) as r:
-                if headers.get("Range") and r.status_code == 200:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                    downloaded = 0
-                    mode = "wb"
-
-                r.raise_for_status()
-                content_length = r.headers.get("Content-Length")
-                expected_total = downloaded + int(content_length) if content_length else total_size
-
-                last = time.time()
-                with open(tmp_path, mode) as f:
-                    for chunk in r.iter_content(chunk_size=chunk_size):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        downloaded += len(chunk)
-
-                        if expected_total:
-                            if time.time() - last > 0.1:
-                                bar.progress(min(1.0, downloaded/expected_total))
-                                mb = downloaded/1e6
-                                if expected_total:
-                                    info.write(f"{mb:,.1f} MB / {expected_total/1e6:,.1f} MB")
-                                else:
-                                    info.write(f"{mb:,.1f} MB")
-                                last = time.time()
-
-            if total_size and downloaded < total_size:
-                raise requests.exceptions.ChunkedEncodingError(
-                    f"Descarga incompleta: {downloaded} de {total_size} bytes"
-                )
-
-            bar.progress(1.0)
-            status.success(f"{label} descargado correctamente.")
-            info.empty(); bar.empty(); status.empty()
-
-            with open(tmp_path, "rb") as f:
-                data = f.read()
-            return io.BytesIO(data)
+            progress.progress(100, text=f"{label}: 100%")
+            df = _read_excel_from_bytes(buf)
+            return df
 
         except Exception as e:
-            info.empty(); bar.empty()
-            status.warning(f"Fallo al descargar {label}: {e}")
-            if attempt < max_retries:
-                time.sleep(2)
-            else:
-                status.error(f"No se pudo descargar {label} tras {max_retries} intentos.")
-                raise
-        finally:
-            info.empty(); bar.empty(); status.empty()
+            last_exc = e
+            attempt += 1
+            st.warning(f"Fallo descargando {label}. Reintentando ({attempt}/{retry})…")
+            time.sleep(1.5)
 
-def read_excel_from_bytes(bio, label="archivo"):
-    with st.spinner(f"Procesando {label}…"):
-        bio.seek(0)
-        df = pd.read_excel(bio, engine="openpyxl", dtype=str)
-        df = df.fillna("")
+    raise RuntimeError(f"No se pudo descargar {label}: {last_exc}")
+
+def load_aux_temas(file) -> pd.DataFrame:
+    """Temáticas: col1 = término, col2 = normalizado"""
+    df = pd.read_excel(file)
+    if df.shape[1] < 2:
+        raise ValueError("La plantilla de Temáticas debe tener 2 columnas: término y normalizado.")
+    df = df.iloc[:, :2].copy()
+    df.columns = ["termino", "normalizado"]
+    df["termino"] = df["termino"].astype(str).str.strip()
+    df["normalizado"] = df["normalizado"].astype(str).str.strip()
     return df
 
-# =============== CSS: ANCHO SIDEBAR + TEMA ===============
-SIDEBAR_CSS = """
-<style>
-/* Ancho máximo del sidebar para que no aparezca angosto */
-section[data-testid="stSidebar"] { min-width: 420px; max-width: 420px; }
-/* Cards/info más legibles */
-.block-container { padding-top: 1.2rem; }
-</style>
-"""
-st.markdown(SIDEBAR_CSS, unsafe_allow_html=True)
+def load_aux_excluir(file) -> pd.DataFrame:
+    """Términos a excluir: 1 columna."""
+    df = pd.read_excel(file)
+    if df.shape[1] < 1:
+        raise ValueError("La plantilla de Términos a excluir debe tener al menos 1 columna.")
+    df = df.iloc[:, :1].copy()
+    df.columns = ["excluir"]
+    df["excluir"] = df["excluir"].astype(str).str.strip()
+    return df
 
-# Tema claro/oscuro (beta) aplicado sobre elementos (no cambia el theme de Streamlit en vivo)
-def apply_inline_theme(theme_name: str):
-    if theme_name == "Claro":
-        st.markdown("""
-        <style>
-        .theme-surface { background: #ffffff; color: #111111; }
-        .theme-panel   { background: #f4f6f8; border-radius: 8px; padding: 12px; }
-        </style>
-        """, unsafe_allow_html=True)
-        return LOGO_LIGHT
-    else:
-        st.markdown("""
-        <style>
-        .theme-surface { background: #0e1117; color: #ffffff; }
-        .theme-panel   { background: #0f172a; border-radius: 8px; padding: 12px; }
-        </style>
-        """, unsafe_allow_html=True)
-        return LOGO_DARK
+def find_matches(df, cols_busqueda, tematicas_df, fuente: str):
+    """
+    Busca coincidencias de 'tematicas_df.termino' en columnas definidas.
+    Devuelve df_resultados parcial + bitácora parcial por término.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(), pd.DataFrame(columns=["Fuente", "Término", "Resultados"])
 
-# =============== SIDEBAR ===============
-with st.sidebar:
-    # selector de tema
-    ss.ui_theme = st.segmented_control("Tema", options=["Oscuro","Claro"], default="Oscuro")
+    if tematicas_df is None or tematicas_df.empty:
+        return pd.DataFrame(), pd.DataFrame(columns=["Fuente", "Término", "Resultados"])
 
-logo = apply_inline_theme(ss.ui_theme)
+    # normaliza columns para buscar
+    df_norm = df.copy()
+    col_map = {}
+    for col in cols_busqueda:
+        if col in df_norm.columns:
+            key = f"_norm_{col}"
+            df_norm[key] = df_norm[col].astype(str).map(normalize_txt).str.lower()
+            col_map[col] = key
 
-with st.sidebar:
-    st.image(logo, use_container_width=True)
-    st.caption("Biblioteca Juan Roa Vásquez")
+    resultados = []
+    bit_tmp = []
 
-    st.markdown("### Carga de archivos")
+    for _, row in tematicas_df.iterrows():
+        termino = row["termino"]
+        term_norm = normalize_txt(termino).lower()
+        mask_total = pd.Series(False, index=df_norm.index)
+        col_hit = None
 
-    # Fuente de datos (con aviso si ya hay oficiales cargadas)
-    fuente = st.radio("Fuente de datos", options=("Desde web oficial","Subir archivos"), index=0)
-    if fuente == "Subir archivos" and (ss.df_digital is not None or ss.df_fisica is not None) and ss.loaded_from_web:
-        st.warning(
-            "Estás cambiando a **archivos locales**. "
-            "Si adjuntas archivos puede que **no consultes la última versión**. "
-            "Los archivos adjuntos **no se almacenan** por la Universidad. Se eliminan al cerrar la app.",
-            icon="⚠️"
-        )
+        for col, norm_col in col_map.items():
+            # contención simple (puedes mejorar con regex si quieres)
+            hit = df_norm[norm_col].str.contains(term_norm, na=False)
+            if hit.any() and col_hit is None:
+                col_hit = col  # registramos primera columna donde coincida
+            mask_total = mask_total | hit
 
-    sb_status = st.container()
+        df_hits = df.loc[mask_total].copy()
+        if not df_hits.empty:
+            df_hits["Temática"] = termino
+            df_hits["Temática normalizada"] = row["normalizado"]
+            df_hits["Columna de coincidencia"] = col_hit if col_hit else ""
+            resultados.append(df_hits)
 
-    # Botones oficiales con estado/indicador permanente y deshabilitar si ya está cargado
-    c1, c2 = st.columns(2)
-    with c1:
-        disabled_dig = ss.downloading_digital or ss.processing_digital or (ss.df_digital is not None and ss.loaded_from_web)
-        dig_label = "💾 Digital (oficial)" if ss.df_digital is None else "✅ Digital cargada"
-        if st.button(dig_label, use_container_width=True, disabled=disabled_dig):
-            try:
-                ss.busy_msg = "Descargando base Digital…"
-                ss.downloading_digital = True
-                bio = download_with_resume(URL_DIGITAL, "Colección Digital", container=sb_status)
-                ss.busy_msg = "Procesando base Digital…"
-                ss.processing_digital = True
-                ss.df_digital = read_excel_from_bytes(bio, "base Digital")
-                ss.loaded_from_web = True
-                st.toast("Base Digital cargada en memoria.")
-            except Exception as e:
-                st.error(f"No se pudo descargar la base Digital: {e}")
-            finally:
-                ss.downloading_digital = False
-                ss.processing_digital = False
-                ss.busy_msg = ""
+            bit_tmp.append({"Fuente": fuente, "Término": termino, "Resultados": int(df_hits.shape[0])})
+        else:
+            # también registramos 0 resultados
+            bit_tmp.append({"Fuente": fuente, "Término": termino, "Resultados": 0})
 
-    with c2:
-        disabled_fis = ss.downloading_fisica or ss.processing_fisica or (ss.df_fisica is not None and ss.loaded_from_web)
-        fis_label = "💾 Física (oficial)" if ss.df_fisica is None else "✅ Física cargada"
-        if st.button(fis_label, use_container_width=True, disabled=disabled_fis):
-            try:
-                ss.busy_msg = "Descargando base Física…"
-                ss.downloading_fisica = True
-                bio = download_with_resume(URL_FISICA, "Colección Física", container=sb_status)
-                ss.busy_msg = "Procesando base Física…"
-                ss.processing_fisica = True
-                ss.df_fisica = read_excel_from_bytes(bio, "base Física")
-                ss.loaded_from_web = True
-                st.toast("Base Física cargada en memoria.")
-            except Exception as e:
-                st.error(f"No se pudo descargar la base Física: {e}")
-            finally:
-                ss.downloading_fisica = False
-                ss.processing_fisica = False
-                ss.busy_msg = ""
+    df_final = pd.concat(resultados, ignore_index=True) if resultados else pd.DataFrame()
+    bit_df = pd.DataFrame(bit_tmp, columns=["Fuente", "Término", "Resultados"])
+    return df_final, bit_df
 
-    # Carga manual (solo si elige "Subir archivos")
-    if fuente == "Subir archivos":
-        st.markdown("**O sube tus archivos manualmente (.xlsx)**")
-        up_dig = st.file_uploader("Base de datos digital (.xlsx)", type=["xlsx"], key="up_dig_v7_0")
-        up_fis = st.file_uploader("Base de datos física (.xlsx)",  type=["xlsx"], key="up_fis_v7_0")
-        if up_dig is not None:
-            ss.df_digital = read_excel_from_bytes(up_dig, "base Digital")
-            ss.loaded_from_web = False
-            st.success("Base Digital cargada (archivo local).")
-        if up_fis is not None:
-            ss.df_fisica = read_excel_from_bytes(up_fis, "base Física")
-            ss.loaded_from_web = False
-            st.success("Base Física cargada (archivo local).")
+def remove_duplicates(df, colname):
+    """Elimina duplicados por una columna si existe."""
+    if df is None or df.empty:
+        return df
+    if colname and (colname in df.columns):
+        df = df.drop_duplicates(subset=[colname], keep="first")
+    return df
 
-    st.markdown("---")
-    st.caption("**Plantillas oficiales:**")
-    st.markdown(f"- [Temáticas]({URL_PLANTILLA_TEMATICAS})")
-    st.markdown(f"- [Términos a excluir]({URL_PLANTILLA_EXCLUSION})")
+def highlight_workbook(writer, df_result, cols_highlight, excluir_list):
+    """Crea XLSX con resaltado amarillo en términos a excluir + hoja Bitácora."""
+    wb  = writer.book
+    ws1 = wb.add_worksheet("Resultados")
+    ws2 = wb.add_worksheet("Bitácora")
+    # Formatos
+    fmt_header = wb.add_format({"bold": True, "bg_color": "#D9E1F2", "border": 1})
+    fmt_cell = wb.add_format({"border": 1})
+    fmt_yellow = wb.add_format({"bg_color": "#FFF68F", "border": 1})
 
-    st.markdown("### Archivos auxiliares (obligatorios)")
-    tem_up = st.file_uploader("Temáticas (.xlsx, col1=término, col2=normalizado)", type=["xlsx"], key="tem_up_v7_0")
-    exc_up = st.file_uploader("Términos a excluir (.xlsx, col1)", type=["xlsx"], key="exc_up_v7_0")
+    # === Hoja Resultados ===
+    cols = list(df_result.columns)
+    for j, c in enumerate(cols):
+        ws1.write(0, j, c, fmt_header)
 
-    if tem_up is not None:
-        df = read_excel_from_bytes(tem_up, "Temáticas")
-        ss.tematicas_df = df[[df.columns[0], df.columns[1]]].rename(
-            columns={df.columns[0]:"termino", df.columns[1]:"normalizado"}).fillna("")
-        st.success(f"Temáticas cargadas: {len(ss.tematicas_df)}")
+    # data
+    excl_norm = [normalize_txt(x).lower() for x in excluir_list]
+    col_idx_to_check = [cols.index(c) for c in cols_highlight if c in cols]
 
-    if exc_up is not None:
-        df = read_excel_from_bytes(exc_up, "Términos a excluir")
-        ss.excluir_df = df[[df.columns[0]]].rename(columns={df.columns[0]:"excluir"}).fillna("")
-        st.success(f"Términos a excluir cargados: {len(ss.excluir_df)}")
+    for i in range(df_result.shape[0]):
+        for j, c in enumerate(cols):
+            val = df_result.iat[i, j]
+            fmt = fmt_cell
+            if j in col_idx_to_check:
+                text = normalize_txt(val).lower()
+                if any(x in text for x in excl_norm if x):
+                    fmt = fmt_yellow
+            ws1.write(i+1, j, val, fmt)
 
-    st.markdown("---")
-    # Nueva búsqueda que mantiene en memoria las bases oficiales/locales pero limpia lo demás
-    if st.button("🆕 Nueva búsqueda (mantener bases en memoria)", use_container_width=True):
-        for k in ("tematicas_df","excluir_df","results_df","bitacora_df"):
-            ss[k] = None
-        st.toast("Listo. Puedes cargar nuevas Temáticas y Términos a excluir para una nueva búsqueda.")
-        st.experimental_rerun()
+    # auto width básico
+    for j, c in enumerate(cols):
+        maxw = max(10, min(60, int(df_result[c].astype(str).map(len).max() if not df_result.empty else 10)))
+        ws1.set_column(j, j, maxw)
 
-    # En vez de “Liberar memoria”, mostramos una nota clara
-    st.info("ℹ️ Si **cierras** o **recargas** la página del navegador, la herramienta se reinicia y se borran los datos de esta sesión.", icon="💡")
+    # === Hoja Bitácora ===
+    bit = ss.get("bitacora")
+    if bit is None or bit.empty:
+        bit = pd.DataFrame(columns=["Fuente", "Término", "Resultados"])
+    cols_b = list(bit.columns)
+    for j, c in enumerate(cols_b):
+        ws2.write(0, j, c, fmt_header)
 
-# =============== BANNER DE TRABAJO Y AUTODESCARGA INICIAL ===============
-if ss.busy_msg:
-    st.info(f"**{ss.busy_msg}** — por favor espera. No cierres esta ventana.", icon="⏳")
+    for i in range(bit.shape[0]):
+        for j, c in enumerate(cols_b):
+            ws2.write(i+1, j, bit.iat[i, j], fmt_cell)
 
-# Autodescarga al iniciar por primera vez (mientras el usuario puede adjuntar plantillas)
-if not ss.auto_started and ss.df_digital is None and ss.df_fisica is None:
-    ss.auto_started = True
-    st.info("Obteniendo las bases **desde la web oficial** por primera vez. Esto puede tardar **4–5 minutos**. "
-            "Mientras tanto, puedes ir cargando las **Temáticas** y los **Términos a excluir** en la barra lateral.",
-            icon="🌐")
-    try:
-        # Digital
-        ss.busy_msg = "Descargando base Digital…"
-        ss.downloading_digital = True
-        bio_d = download_with_resume(URL_DIGITAL, "Colección Digital")
-        ss.busy_msg = "Procesando base Digital…"
-        ss.processing_digital = True
-        ss.df_digital = read_excel_from_bytes(bio_d, "base Digital")
-        # Física
-        ss.busy_msg = "Descargando base Física…"
-        ss.downloading_fisica = True
-        bio_f = download_with_resume(URL_FISICA, "Colección Física")
-        ss.busy_msg = "Procesando base Física…"
-        ss.processing_fisica = True
-        ss.df_fisica = read_excel_from_bytes(bio_f, "base Física")
+    for j, c in enumerate(cols_b):
+        maxw = max(10, min(40, int(bit[c].astype(str).map(len).max() if not bit.empty else 10)))
+        ws2.set_column(j, j, maxw)
 
-        ss.loaded_from_web = True
-        st.success("✅ Bases Digital y Física **cargadas en memoria** desde la web oficial. ¡Listo para cargar Temáticas y Excluir!")
-    except Exception as e:
-        st.error(f"No se pudo completar la autodescarga: {e}")
-    finally:
-        ss.downloading_digital = False
-        ss.processing_digital = False
-        ss.downloading_fisica  = False
-        ss.processing_fisica   = False
-        ss.busy_msg = ""
+def export_xlsx_with_highlight(df_result, excluir_df):
+    bio = io.BytesIO()
+    excluir_list = excluir_df["excluir"].tolist() if (excluir_df is not None and not excluir_df.empty) else []
+    with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
+        # Lo escribimos también con pandas por si alguien abre tablas desde aquí
+        df_result.to_excel(writer, sheet_name="Resultados", index=False)
+        # Luego re-escribimos con formato (misma hoja)
+        # Re-crear Libro y hojas con nuestro formateo:
+        writer.close()  # cierra para poder rehacer con highlight
+    # Volvemos a crear para formateo
+    bio2 = io.BytesIO()
+    with pd.ExcelWriter(bio2, engine="xlsxwriter") as writer2:
+        highlight_workbook(writer2, df_result, ["Título", "Temáticas"], excluir_list)
+    bio2.seek(0)
+    return bio2
 
-# =============== CABECERA / MENSAJE ORIENTADOR ===============
-st.title("Herramienta para la elaboración de bibliografías especializadas")
-st.markdown(
-    f"""
-<div class="theme-panel">
-<ul style="margin-bottom:0">
-<li>Objetivo: permitir la autogestión de bibliografías especializadas por programa/asignatura/tema y resaltar términos a excluir para depuración manual.</li>
-<li>Usa siempre las bases oficiales (Digital/Física) desde la barra lateral para consultar la versión más reciente.</li>
-<li>Plantillas: <a href="{URL_PLANTILLA_TEMATICAS}">Temáticas</a> y <a href="{URL_PLANTILLA_EXCLUSION}">Términos a excluir</a>. No dejes filas en blanco.</li>
-<li>Los archivos adjuntos **no se almacenan** por la Universidad y se eliminan al cerrar la app.</li>
-<li>El proceso puede tardar algunos minutos; puedes seguir usando tu equipo (no cierres el navegador).</li>
-</ul>
-</div>
-""",
-    unsafe_allow_html=True,
+# ========================= UI: SIDEBAR =========================
+
+# Tema (opcional)
+st.sidebar.caption("Tema")
+c1, c2 = st.sidebar.columns([1,1])
+with c1:
+    if st.button("Oscuro", use_container_width=True):
+        ss["tema"] = "dark"
+with c2:
+    if st.button("Claro", use_container_width=True):
+        ss["tema"] = "light"
+
+logo_url = DARK_LOGO if ss["tema"] == "dark" else LIGHT_LOGO
+st.sidebar.image(logo_url, use_container_width=True)
+st.sidebar.caption("Biblioteca Juan Roa Vásquez")
+
+# Fuente de datos
+fuente = st.sidebar.radio("Fuente de datos", ("Desde web oficial", "Subir archivos"))
+
+if fuente == "Subir archivos" and (ss["digital_ok"] or ss["fisica_ok"]):
+    st.sidebar.warning(
+        "Estás cambiando a archivos locales. **Dejas de usar la versión oficial**. "
+        "Los archivos adjuntos **no se almacenan** por la Universidad y se eliminan al cerrar la app."
+    )
+
+colA, colB = st.sidebar.columns(2)
+with colA:
+    st.button(
+        "Digital (oficial)",
+        key="btn_dig",
+        disabled=ss["digital_loading"] or ss["digital_ok"] or (fuente != "Desde web oficial"),
+        help="Descarga desde la web oficial",
+        on_click=lambda: ss.update(digital_loading=True)
+    )
+    if ss["digital_loading"]:
+        st.caption("⏳ Descargando digital…")
+    elif ss["digital_ok"]:
+        st.success("✅ Digital cargada")
+
+with colB:
+    st.button(
+        "Física (oficial)",
+        key="btn_fis",
+        disabled=ss["fisica_loading"] or ss["fisica_ok"] or (fuente != "Desde web oficial"),
+        help="Descarga desde la web oficial",
+        on_click=lambda: ss.update(fisica_loading=True)
+    )
+    if ss["fisica_loading"]:
+        st.caption("⏳ Descargando física…")
+    elif ss["fisica_ok"]:
+        st.success("✅ Física cargada")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Plantillas oficiales:")
+st.sidebar.markdown(
+    "- [Temáticas](https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20Tem%C3%A1ticas.xlsx)  \n"
+    "- [Términos a excluir](https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20T%C3%A9rminos%20a%20excluir.xlsx)"
 )
 
-if ss.loaded_from_web:
-    st.success("Trabajando con bases **en memoria** descargadas desde la **web oficial** (botones oficiales deshabilitados).")
+st.sidebar.markdown("---")
+st.sidebar.subheader("Archivos auxiliares (obligatorios)")
+tem_file = st.sidebar.file_uploader("Temáticas (.xlsx, col1= término, col2= normalizado)", type=["xlsx"])
+exc_file  = st.sidebar.file_uploader("Términos a excluir (.xlsx, 1ra columna)", type=["xlsx"])
 
-# Requisitos: bases y plantillas
-if ss.df_digital is None or ss.df_fisica is None:
-    st.info("Cargando las bases desde la web oficial… o usa la barra lateral para subir archivos manualmente.")
-    st.stop()
+st.sidebar.markdown("---")
+st.sidebar.button("🧹 Nueva búsqueda (mantener bases oficiales)", on_click=clear_for_new_search)
+st.sidebar.info("Para **reiniciar completamente**, refresca la página o cierra la pestaña.")
 
-if ss.tematicas_df is None or ss.excluir_df is None:
-    st.info("✅ Bases cargadas. Ahora, por favor **carga las Temáticas y los Términos a excluir** en la barra lateral para continuar.")
-    st.stop()
+# ========================= UI: MAIN =========================
 
-# =============== CONFIGURACIÓN DE BÚSQUEDA/DUPLICADOS ===============
+st.title("Herramienta para la elaboración de bibliografías especializadas")
+
+with st.container(border=True):
+    st.markdown(
+        "- **Objetivo:** permitir la autogestión por programa/asignatura/tema y resaltar términos a excluir para depuración manual.  \n"
+        "- Usa siempre las bases oficiales (Digital/Física) o súbelas **manualmente** en la barra lateral.  \n"
+        "- **Plantillas:** [Temáticas](https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20Tem%C3%A1ticas.xlsx) "
+        "y [Términos a excluir](https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20T%C3%A9rminos%20a%20excluir.xlsx).  \n"
+        "- Los archivos adjuntos **no se almacenan** por la Universidad y se eliminan al cerrar la app.  \n"
+        "- El proceso puede tardar algunos minutos; puedes seguir usando tu equipo."
+    )
+
+# Estado de bases cargadas
+ok_badges = []
+if ss["digital_ok"]: ok_badges.append("Digital ✅")
+if ss["fisica_ok"]:  ok_badges.append("Física ✅")
+if ok_badges:
+    st.success("Bases cargadas: " + " • ".join(ok_badges))
+
+# ============= AUTO DESCARGA =============
+if fuente == "Desde web oficial":
+    # Si no están cargadas todavía, dispara descarga de ambas
+    need_dig = not ss["digital_ok"]
+    need_fis = not ss["fisica_ok"]
+
+    if need_dig or need_fis:
+        with st.status("Descargando bases desde la web oficial…", expanded=True) as status:
+            if need_dig:
+                ss["digital_loading"] = True
+                try:
+                    df_d = download_excel_with_progress(URL_DIGITAL, "Digital")
+                    ss["df_digital"] = df_d
+                    ss["digital_ok"] = True
+                    st.write("✅ Digital cargada")
+                except Exception as e:
+                    st.error(f"No se pudo descargar la base Digital: {e}")
+                finally:
+                    ss["digital_loading"] = False
+
+            if need_fis:
+                ss["fisica_loading"] = True
+                try:
+                    df_f = download_excel_with_progress(URL_FISICA, "Física")
+                    ss["df_fisica"] = df_f
+                    ss["fisica_ok"] = True
+                    st.write("✅ Física cargada")
+                except Exception as e:
+                    st.error(f"No se pudo descargar la base Física: {e}")
+                finally:
+                    ss["fisica_loading"] = False
+
+            if ss["digital_ok"] and ss["fisica_ok"]:
+                status.update(label="¡Bases oficiales cargadas en memoria!", state="complete")
+            else:
+                status.update(label="Carga incompleta. Revisa los mensajes.", state="error")
+
+else:
+    # Subir manual de Digital / Física si el usuario lo decide
+    st.info("Fuente de datos: **Subir archivos**. (Opcionalmente conserva las oficiales ya cargadas).")
+
+# ========================= CARGA AUXILIARES =========================
+if tem_file is not None:
+    try:
+        ss["tematicas_df"] = load_aux_temas(tem_file)
+        st.success(f"Temáticas cargadas: {ss['tematicas_df'].shape[0]} términos.")
+    except Exception as e:
+        st.error(f"Error leyendo Temáticas: {e}")
+
+if exc_file is not None:
+    try:
+        ss["excluir_df"] = load_aux_excluir(exc_file)
+        st.success(f"Términos a excluir cargados: {ss['excluir_df'].shape[0]} términos.")
+    except Exception as e:
+        st.error(f"Error leyendo Términos a excluir: {e}")
+
+# ========================= CONFIGURACIÓN DE BÚSQUEDA =========================
 st.subheader("Configuración de búsqueda y duplicados")
 
-cols_dig = list(ss.df_digital.columns)
-cols_fis = list(ss.df_fisica.columns)
-common_cols = sorted(set(cols_dig + cols_fis))
+# Detecta columnas si ya hay DataFrames
+cols_dig = list(ss["df_digital"].columns) if (ss["df_digital"] is not None) else []
+cols_fis = list(ss["df_fisica"].columns)  if (ss["df_fisica"]  is not None) else []
 
-c1, c2, c3, c4 = st.columns([1,1,1,1])
-with c1:
-    col_busq1 = st.selectbox("Búsqueda principal por:", options=common_cols,
-                             index=common_cols.index(DEFAULT_COL_TITULO) if DEFAULT_COL_TITULO in common_cols else 0)
-with c2:
-    col_busq2 = st.selectbox("Búsqueda complementaria por:", options=common_cols,
-                             index=common_cols.index(DEFAULT_COL_TEMATICAS) if DEFAULT_COL_TEMATICAS in common_cols else 0)
-with c3:
-    col_dup_dig = st.selectbox("Columna de duplicados en Digital:", options=cols_dig,
-                               index=cols_dig.index(DEFAULT_DUP_DIGITAL) if DEFAULT_DUP_DIGITAL in cols_dig else 0)
-with c4:
-    col_dup_fis = st.selectbox("Columna de duplicados en Física:", options=cols_fis,
-                               index=cols_fis.index(DEFAULT_DUP_FISICA) if DEFAULT_DUP_FISICA in cols_fis else 0)
+col1, col2, col3, col4 = st.columns([1.2, 1.2, 1.2, 1.2])
+with col1:
+    col_busq_1 = st.selectbox("Búsqueda principal por:", options=(cols_dig or [DEFAULT_SEARCH_COL1]),
+                              index=(cols_dig.index(DEFAULT_SEARCH_COL1) if DEFAULT_SEARCH_COL1 in cols_dig else 0))
+with col2:
+    col_busq_2 = st.selectbox("Búsqueda complementaria por:", options=(cols_dig or [DEFAULT_SEARCH_COL2]),
+                              index=(cols_dig.index(DEFAULT_SEARCH_COL2) if DEFAULT_SEARCH_COL2 in cols_dig else 0))
+with col3:
+    dup_dig = st.selectbox("Columna de duplicados en Digital:", options=(cols_dig or [DEFAULT_DUP_DIGITAL]),
+                           index=(cols_dig.index(DEFAULT_DUP_DIGITAL) if DEFAULT_DUP_DIGITAL in cols_dig else 0))
+with col4:
+    dup_fis = st.selectbox("Columna de duplicados en Física:", options=(cols_fis or [DEFAULT_DUP_FISICA]),
+                           index=(cols_fis.index(DEFAULT_DUP_FISICA) if DEFAULT_DUP_FISICA in cols_fis else 0))
 
-st.caption("Por defecto la búsqueda se realiza en “Título” y “Temáticas”. Puedes elegir otras dos columnas si lo necesitas.")
+st.caption("Consejo: por defecto la búsqueda se realiza en **Título** y **Temáticas**. Puedes elegir otras dos columnas si lo necesitas.")
 
-# =============== BÚSQUEDA ===============
-st.markdown("---")
-if st.button("🚀 Iniciar búsqueda", type="primary"):
-    excluye = [str(x).strip() for x in ss.excluir_df["excluir"].tolist() if str(x).strip()!=""]
+# ========================= EJECUCIÓN DE BÚSQUEDA =========================
+todo_ok_para_buscar = ( (ss["df_digital"] is not None or ss["df_fisica"] is not None)
+                        and (ss["tematicas_df"] is not None)
+                        and (ss["excluir_df"] is not None) )
 
-    barra = st.progress(0)
-    estado = st.empty()
+if not todo_ok_para_buscar:
+    st.info("Cargando las bases desde la web oficial… o usa la barra lateral para subir archivos manualmente.")
 
-    DF_D = ss.df_digital.copy()
-    DF_F = ss.df_fisica.copy()
+# Botón
+run_search = st.button("🚀 Iniciar búsqueda", disabled=not todo_ok_para_buscar)
 
-    for df, dup_col in ((DF_D,col_dup_dig),(DF_F,col_dup_fis)):
-        for c in (col_busq1, col_busq2, dup_col):
-            if c in df.columns:
-                df[c] = df[c].astype(str).fillna("")
+if run_search and todo_ok_para_buscar:
+    with st.status("Buscando coincidencias…", expanded=True) as status:
+        status.write("Normalizando y preparando…")
+        # 1) Digital
+        df_dig_res, bit_dig = pd.DataFrame(), pd.DataFrame(columns=["Fuente", "Término", "Resultados"])
+        if ss["df_digital"] is not None and not ss["df_digital"].empty:
+            status.write("Buscando en **Digital**…")
+            df_dig_res, bit_dig = find_matches(
+                ss["df_digital"],
+                cols_busqueda=[col_busq_1, col_busq_2],
+                tematicas_df=ss["tematicas_df"],
+                fuente="Digital"
+            )
+            # Duplicados Digital
+            df_dig_res = remove_duplicates(df_dig_res, dup_dig)
 
-    def buscar(df, fuente, total_steps, offset):
-        res = []
-        tem = ss.tematicas_df.copy()
-        tem["termino"]      = tem["termino"].astype(str).fillna("")
-        tem["normalizado"]  = tem["normalizado"].astype(str).fillna("")
-        N = len(tem)
-        t0 = time.time()
+        # 2) Física
+        df_fis_res, bit_fis = pd.DataFrame(), pd.DataFrame(columns=["Fuente", "Término", "Resultados"])
+        if ss["df_fisica"] is not None and not ss["df_fisica"].empty:
+            status.write("Buscando en **Física**…")
+            df_fis_res, bit_fis = find_matches(
+                ss["df_fisica"],
+                cols_busqueda=[col_busq_1, col_busq_2],
+                tematicas_df=ss["tematicas_df"],
+                fuente="Física"
+            )
+            # Duplicados Física
+            df_fis_res = remove_duplicates(df_fis_res, dup_fis)
 
-        for i, row in tem.iterrows():
-            term = normalize_text(row["termino"])
-            if term:
-                m1 = df[col_busq1].map(lambda s: term in normalize_text(s))
-                m2 = df[col_busq2].map(lambda s: term in normalize_text(s))
-                md = df[m1 | m2].copy()
-                if not md.empty:
-                    md["Temática"]                 = row["termino"]
-                    md["Temática normalizada"]     = row["normalizado"]
-                    md["Columna de coincidencia"]  = None
-                    md.loc[m1[m1].index, "Columna de coincidencia"] = col_busq1
-                    md.loc[m2[m2].index, "Columna de coincidencia"] = md["Columna de coincidencia"].fillna(col_busq2)
-                    md["Fuente"] = fuente
-                    res.append(md)
+        # Unimos resultados
+        df_final = pd.concat([df_dig_res, df_fis_res], ignore_index=True) if (not df_dig_res.empty or not df_fis_res.empty) else pd.DataFrame()
+        # Bitácora: unimos y aseguramos también términos con 0
+        bit_total = pd.concat([bit_dig, bit_fis], ignore_index=True)
+        # Asegurar cero por cada término y fuente que no haya sacado nada
+        all_terms = ss["tematicas_df"]["termino"].unique().tolist()
+        fuentes = ["Digital", "Física"]
+        rows_zero = []
+        for fu in fuentes:
+            terms_conteo = set(bit_total.loc[bit_total["Fuente"]==fu, "Término"].tolist())
+            for t in all_terms:
+                if t not in terms_conteo:
+                    rows_zero.append({"Fuente": fu, "Término": t, "Resultados": 0})
+        if rows_zero:
+            bit_total = pd.concat([bit_total, pd.DataFrame(rows_zero)], ignore_index=True)
 
-            frac = (i + 1) / N
-            elapsed = time.time() - t0
-            est_total = elapsed / max(frac, 1e-6)
-            est_rem = max(0, int(est_total - elapsed))
-            barra.progress(min(1.0, (offset + i + 1) / total_steps))
-            estado.info(f"{fuente}: {i+1}/{N} términos • transcurrido: {int(elapsed)} s • restante: {est_rem} s")
+        # Guardamos en sesión
+        ss["df_resultados"] = df_final
+        # Orden bitácora: por Fuente y luego por Resultados desc
+        ss["bitacora"] = bit_total.sort_values(by=["Fuente","Resultados","Término"], ascending=[True, False, True]).reset_index(drop=True)
 
-        if res:
-            return pd.concat(res, ignore_index=True)
-        return pd.DataFrame()
+        if df_final.empty:
+            status.update(label="Sin resultados para los términos dados.", state="error")
+        else:
+            status.update(label="Búsqueda finalizada.", state="complete")
 
-    total = len(ss.tematicas_df) * 2
-    res_d = buscar(DF_D, "Digital", total, 0)
-    res_f = buscar(DF_F,  "Física",  total, len(ss.tematicas_df))
+# ========================= RESULTADOS =========================
+df_out = ss.get("df_resultados")
+if df_out is not None:
+    st.subheader("Resultados (vista previa)")
+    st.write(f"Filas: **{df_out.shape[0]:,}**")
+    st.dataframe(df_out.head(200), use_container_width=True)
 
-    if not res_d.empty and col_dup_dig in res_d.columns:
-        res_d = res_d.drop_duplicates(subset=[col_dup_dig], keep="first")
-    if not res_f.empty and col_dup_fis in res_f.columns:
-        res_f = res_f.drop_duplicates(subset=[col_dup_fis], keep="first")
+    # Bitácora visible siempre (incluye términos con 0)
+    st.subheader("🧾 Bitácora (por término y fuente)")
+    st.dataframe(ss["bitacora"], use_container_width=True, height=300)
 
-    res = pd.concat([res_d, res_f], ignore_index=True) if not (res_d.empty and res_f.empty) else pd.DataFrame()
+    # Descargas
+    colx, coly = st.columns(2)
+    with colx:
+        # CSV (sin NaN -> celdas en blanco)
+        csv_bytes = df_out.fillna("").to_csv(index=False).encode("utf-8-sig")
+        st.download_button("📄 Descargar CSV", data=csv_bytes, file_name="resultados.csv", mime="text/csv")
 
-    # Persistir resultados
-    ss.results_df = res
-
-    # Bitácora con ceros
-    tem = ss.tematicas_df[["termino","normalizado"]].drop_duplicates().reset_index(drop=True)
-    fuentes = pd.DataFrame({"Fuente":["Digital","Física"]})
-    grid = fuentes.assign(key=1).merge(tem.assign(key=1), on="key").drop("key", axis=1)
-
-    if res.empty:
-        counts = pd.DataFrame(columns=["Fuente","Temática","Temática normalizada","Resultados"])
-    else:
-        counts = (res
-                  .groupby(["Fuente","Temática","Temática normalizada"], dropna=False)
-                  .size().reset_index(name="Resultados"))
-
-    bit = (grid.merge(counts, how="left",
-                      left_on=["Fuente","termino","normalizado"],
-                      right_on=["Fuente","Temática","Temática normalizada"])
-                .drop(columns=["Temática","Temática normalizada"], errors="ignore")
-                .rename(columns={"termino":"Término","normalizado":"Normalizado"}))
-
-    bit["Resultados"] = bit["Resultados"].fillna(0).astype(int)
-    bit = bit.sort_values(["Fuente","Resultados","Término"], ascending=[True, False, True]).reset_index(drop=True)
-    ss.bitacora_df = bit
-
-    barra.progress(1.0)
-    estado.empty()
-    st.success("Búsqueda finalizada.")
-
-# =============== RESULTADOS (persistentes) ===============
-st.subheader("Resultados")
-if ss.results_df is None or ss.results_df.empty:
-    st.info("Aún no hay resultados. Ejecuta la búsqueda.")
-else:
-    res = ss.results_df
-
-    col_a, col_b = st.columns([1,1])
-    with col_a:
-        show_all = st.checkbox("Mostrar todas las filas", value=False)
-    with col_b:
-        limit = st.number_input("Filas a mostrar (si no muestras todas):", min_value=50, max_value=10000, value=200, step=50)
-
-    if show_all:
-        st.dataframe(res, use_container_width=True, height=560)
-    else:
-        st.dataframe(res.head(int(limit)), use_container_width=True, height=560)
-
-    # CSV completo (sin colores, como siempre)
-    st.download_button(
-        "⬇️ Descargar CSV (todos los resultados)",
-        data=res.fillna("").to_csv(index=False).encode("utf-8"),
-        file_name="resultados.csv",
-        mime="text/csv"
-    )
-
-    # Excel con resaltado + bitácora
-    excluye = [str(x).strip() for x in ss.excluir_df["excluir"].tolist() if str(x).strip()!=""]
-    if excluye:
-        import xlsxwriter
-        xbio = io.BytesIO()
-        writer = pd.ExcelWriter(xbio, engine="xlsxwriter")
-        res.to_excel(writer, index=False, sheet_name="Resultados")
-        wb = writer.book; ws = writer.sheets["Resultados"]
-        fmt = wb.add_format({"bg_color":"#FFF599"})
-
-        cols = list(res.columns)
-        col_tit = cols.index(DEFAULT_COL_TITULO) + 1 if DEFAULT_COL_TITULO in cols else None
-        col_tem = cols.index(DEFAULT_COL_TEMATICAS) + 1 if DEFAULT_COL_TEMATICAS in cols else None
-        excl_norm = [normalize_text(x) for x in excluye]
-
-        for r in range(1, len(res)+1):
-            if col_tit:
-                v = normalize_text(res.iloc[r-1, col_tit-1])
-                if any(t in v for t in excl_norm):
-                    ws.write(r, col_tit-1, res.iloc[r-1, col_tit-1], fmt)
-            if col_tem:
-                v = normalize_text(res.iloc[r-1, col_tem-1])
-                if any(t in v for t in excl_norm):
-                    ws.write(r, col_tem-1, res.iloc[r-1, col_tem-1], fmt)
-
-        # Hoja Bitácora (con ceros)
-        if ss.bitacora_df is not None:
-            ss.bitacora_df.to_excel(writer, index=False, sheet_name="Bitácora")
-
-        writer.close(); xbio.seek(0)
-        st.download_button(
-            "⬇️ Descargar Excel (con resaltado y bitácora)",
-            data=xbio.getvalue(),
-            file_name="resultados_resaltados.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    else:
-        st.info("Carga un “Listado de términos a excluir” para obtener el Excel con resaltado amarillo.")
-
-# =============== BITÁCORA EN PANTALLA (con ceros) ===============
-st.subheader("📑 Bitácora por término")
-if ss.bitacora_df is None or ss.bitacora_df.empty:
-    st.info("Aún no hay bitácora. Ejecuta la búsqueda.")
-else:
-    bit = ss.bitacora_df
-    st.dataframe(bit, use_container_width=True, height=380)
-    st.download_button(
-        "Descargar bitácora (.csv)",
-        data=bit.to_csv(index=False).encode("utf-8"),
-        file_name="bitacora_por_termino.csv",
-        mime="text/csv"
-    )
+    with coly:
+        # XLSX con resaltado
+        try:
+            bio_xlsx = export_xlsx_with_highlight(df_out.fillna(""), ss.get("excluir_df"))
+            st.download_button("📘 Descargar Excel (con resaltado)", data=bio_xlsx.getvalue(),
+                               file_name="resultados_con_resaltado.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as e:
+            st.error(f"No se pudo generar el Excel con resaltado: {e}")
