@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from unidecode import unidecode
-st.sidebar.caption("Versión 7.1")
+
 # =========================
 # CONFIGURACIÓN / CONSTANTES
 # =========================
@@ -62,7 +62,7 @@ ss.setdefault("tematicas_df", None)   # 2 columnas: termino, normalizado
 ss.setdefault("excluir_df",   None)   # 1 columna: termino_excluir
 ss.setdefault("df_resultados", None)
 ss.setdefault("bitacora", None)
-
+st.sidebar.caption("Versión 7.1")
 # ================ UTILIDADES ================
 
 def normalize_txt(x: str) -> str:
