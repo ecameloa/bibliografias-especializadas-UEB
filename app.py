@@ -1,4 +1,3 @@
-st.sidebar.caption("Versión 7.1")
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
 # Universidad El Bosque
@@ -11,7 +10,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from unidecode import unidecode
-
+st.sidebar.caption("Versión 7.1")
 # =========================
 # CONFIGURACIÓN / CONSTANTES
 # =========================
