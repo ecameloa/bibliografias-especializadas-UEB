@@ -3,5 +3,6 @@ pandas>=2.2
 numpy>=1.26
 openpyxl>=3.1
 xlsxwriter>=3.2
-unidecode
 requests>=2.31
+unidecode>=1.4.0
+streamlit-autorefresh>=1.0.1
