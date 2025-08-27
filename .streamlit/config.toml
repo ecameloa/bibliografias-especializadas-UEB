@@ -1,9 +1,9 @@
 [theme]
 base="light"
-primaryColor="#f08013"            # Heliconia, usado en botones y acentos
+primaryColor="#f08013"            # Heliconia, para botones y acentos
 backgroundColor="#ffffff"         # Fondo blanco institucional
-secondaryBackgroundColor="#008776" # Eucalipto, usado en paneles
-textColor="#404827"               # Roble, para títulos y textos principales
+secondaryBackgroundColor="#81bb26" # Acacia, usado en paneles y sidebar
+textColor="#404827"               # Roble, para títulos y texto principal
 
 [client]
 toolbarMode = "minimal"
