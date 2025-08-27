@@ -1,5 +1,5 @@
 # Herramienta para la elaboración de bibliografías especializadas
-
+Elaborado por David Camelo para la Biblioteca de la Universidad El Bosque. 2025 
 ## 📘 Descripción
 Esta aplicación, desarrollada en **Streamlit**, permite realizar búsquedas en las bases de datos de la Biblioteca de la **Universidad El Bosque** (colecciones **Digital** y **Física**), filtrarlas según temáticas, resaltar términos a excluir y exportar resultados en Excel.  
 
@@ -93,3 +93,4 @@ Esto permite evaluar qué términos deben ajustarse o complementarse con otras f
   xlsxwriter>=3.2
   requests>=2.31
   unidecode>=1.4.0
+
