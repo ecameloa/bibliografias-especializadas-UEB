@@ -76,9 +76,12 @@ ss.setdefault("metodo", "A")
 ss.setdefault("b_num_cond", 2)
 ss.setdefault("b_conds", [])  # lista de dicts con los parámetros de cada condición
 
-# Cache global (compartida entre sesiones del servidor) para las bases oficiales
-GLOBAL_DF_DIGITAL = None
-GLOBAL_DF_FISICA = None
+# ⚠️ AJUSTE IMPORTANTE: solo inicializar los globals una vez,
+# para que no se sobrescriban en cada rerun de Streamlit.
+if "GLOBAL_DF_DIGITAL" not in globals():
+    # Cache global (compartida entre sesiones del servidor) para las bases oficiales
+    GLOBAL_DF_DIGITAL = None
+    GLOBAL_DF_FISICA = None
 
 # ---------------------------------- UTILIDADES ----------------------------------
 def normalize_text(s: Any) -> str:
