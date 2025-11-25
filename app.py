@@ -76,6 +76,9 @@ ss.setdefault("metodo", "A")
 ss.setdefault("b_num_cond", 2)
 ss.setdefault("b_conds", [])  # lista de dicts con los parámetros de cada condición
 
+# Cache global (compartida entre sesiones del servidor) para las bases oficiales
+GLOBAL_DF_DIGITAL = None
+GLOBAL_DF_FISICA = None
 
 # ---------------------------------- UTILIDADES ----------------------------------
 def normalize_text(s: Any) -> str:
@@ -413,6 +416,17 @@ with st.expander("ℹ️ Información general", expanded=True):
 # --- Sincronización de bases ---
 st.markdown("#### Bases de datos de las colecciones de la Biblioteca")
 
+# Si otra sesión ya sincronizó las bases durante la vida del servidor,
+# reutilizamos esas mismas tablas sin pedir nueva sincronización.
+if (
+    not ss.bases_ready
+    and GLOBAL_DF_DIGITAL is not None
+    and GLOBAL_DF_FISICA is not None
+):
+    ss.df_digital = GLOBAL_DF_DIGITAL
+    ss.df_fisica = GLOBAL_DF_FISICA
+    ss.bases_ready = True
+
 if not ss.bases_ready:
     st.info(
         "Antes de buscar, sincroniza las bases de datos oficiales o carga los archivos "
@@ -465,12 +479,16 @@ if not ss.bases_ready:
         if ss.df_digital is not None and ss.df_fisica is not None:
             ss.bases_ready = True
             ss.downloading = False
+            # Guardar también en la caché global compartida entre sesiones
+            GLOBAL_DF_DIGITAL = ss.df_digital
+            GLOBAL_DF_FISICA = ss.df_fisica
             st.success("✅ Bases oficiales listas en memoria (sesión).")
 
 if not ss.bases_ready:
     st.stop()
 else:
     st.success("✅ Bases oficiales listas en memoria (sesión).")
+
 
 # ---------------------------------- SELECCIÓN DE MÉTODO ----------------------------------
 st.markdown("### Selecciona el modo de búsqueda")
