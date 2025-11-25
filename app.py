@@ -59,7 +59,7 @@ ss.setdefault("df_fisica", None)
 ss.setdefault("bases_ready", False)
 
 ss.setdefault("downloading", False)
-ss.setdefault("descarga_disparada", False)
+ss.setdefault("descarga_disparada", False)  # ya casi no lo usamos, pero lo dejamos
 
 # Insumos método A
 ss.setdefault("tematicas_df", None)
@@ -76,12 +76,6 @@ ss.setdefault("metodo", "A")
 ss.setdefault("b_num_cond", 2)
 ss.setdefault("b_conds", [])  # lista de dicts con los parámetros de cada condición
 
-# ⚠️ AJUSTE IMPORTANTE: solo inicializar los globals una vez,
-# para que no se sobrescriban en cada rerun de Streamlit.
-if "GLOBAL_DF_DIGITAL" not in globals():
-    # Cache global (compartida entre sesiones del servidor) para las bases oficiales
-    GLOBAL_DF_DIGITAL = None
-    GLOBAL_DF_FISICA = None
 
 # ---------------------------------- UTILIDADES ----------------------------------
 def normalize_text(s: Any) -> str:
@@ -117,6 +111,7 @@ def download_with_resume(
 ) -> io.BytesIO:
     """
     Descarga con barra de progreso y reintentos. Devuelve BytesIO.
+    (Se deja por si luego quieres usarlo para otros flujos; ya no lo usamos para la caché.)
     """
     where = container if container is not None else st
     status = where.empty()
@@ -303,6 +298,33 @@ def build_apa(row: pd.Series) -> str:
     return " ".join([p for p in partes if p]).replace("..", ".")
 
 
+# --------- CARGA CACHEADA DE LAS BASES OFICIALES (COMPARTIDA ENTRE SESIONES) ----------
+@st.cache_data(show_spinner=True)
+def cargar_bd_digital_cache() -> pd.DataFrame:
+    """
+    Descarga y carga la BD de colección Digital.
+    Se ejecuta sólo la primera vez en el servidor; luego se sirve desde caché.
+    """
+    resp = requests.get(URL_DIGITAL, headers=UA, timeout=600)
+    resp.raise_for_status()
+    bio = io.BytesIO(resp.content)
+    df = pd.read_excel(bio, engine="openpyxl", dtype=str).fillna("")
+    return df
+
+
+@st.cache_data(show_spinner=True)
+def cargar_bd_fisica_cache() -> pd.DataFrame:
+    """
+    Descarga y carga la BD de colección Física.
+    Se ejecuta sólo la primera vez en el servidor; luego se sirve desde caché.
+    """
+    resp = requests.get(URL_FISICA, headers=UA, timeout=600)
+    resp.raise_for_status()
+    bio = io.BytesIO(resp.content)
+    df = pd.read_excel(bio, engine="openpyxl", dtype=str).fillna("")
+    return df
+
+
 # CSS para cambiar el texto de "Browse files" (mejor esfuerzo)
 st.markdown(
     """
@@ -419,17 +441,6 @@ with st.expander("ℹ️ Información general", expanded=True):
 # --- Sincronización de bases ---
 st.markdown("#### Bases de datos de las colecciones de la Biblioteca")
 
-# Si otra sesión ya sincronizó las bases durante la vida del servidor,
-# reutilizamos esas mismas tablas sin pedir nueva sincronización.
-if (
-    not ss.bases_ready
-    and GLOBAL_DF_DIGITAL is not None
-    and GLOBAL_DF_FISICA is not None
-):
-    ss.df_digital = GLOBAL_DF_DIGITAL
-    ss.df_fisica = GLOBAL_DF_FISICA
-    ss.bases_ready = True
-
 if not ss.bases_ready:
     st.info(
         "Antes de buscar, sincroniza las bases de datos oficiales o carga los archivos "
@@ -442,50 +453,25 @@ if not ss.bases_ready:
             "🔄 Sincronizar bases de datos oficiales",
             type="primary",
             use_container_width=True,
-            disabled=ss.downloading or ss.descarga_disparada,
+            disabled=ss.downloading,
         )
 
     if btn_sync and not ss.downloading:
-        ss.descarga_disparada = True
         ss.downloading = True
-
-    if ss.downloading:
-        st.info(
+        ss.descarga_disparada = True
+        with st.spinner(
             "Sincronizando colecciones **Digital** y **Física**… "
-            "Puedes seguir usando tu equipo. No cierres esta ventana."
-        )
-
-        # Digital
-        st.subheader("Descargando Base de datos de la colección Digital…")
-        zona_dig = st.container()
-        try:
-            bio_d = download_with_resume(URL_DIGITAL, "Colección Digital", zona_dig)
-            st.caption("Colección Digital: descarga completa. Verificando archivo…")
-            ss.df_digital = safe_read_excel(bio_d, "Colección Digital")
-            st.success("Base de datos de la colección Digital lista ✓")
-        except Exception as e:
-            st.error(f"No fue posible descargar la base Digital: {e}")
-            ss.downloading = False
-
-        # Física
-        st.subheader("Descargando Base de datos de la colección Física…")
-        zona_fis = st.container()
-        try:
-            bio_f = download_with_resume(URL_FISICA, "Colección Física", zona_fis)
-            st.caption("Colección Física: descarga completa. Verificando archivo…")
-            ss.df_fisica = safe_read_excel(bio_f, "Colección Física")
-            st.success("Base de datos de la colección Física lista ✓")
-        except Exception as e:
-            st.error(f"No fue posible descargar la base Física: {e}")
-            ss.downloading = False
-
-        if ss.df_digital is not None and ss.df_fisica is not None:
-            ss.bases_ready = True
-            ss.downloading = False
-            # Guardar también en la caché global compartida entre sesiones
-            GLOBAL_DF_DIGITAL = ss.df_digital
-            GLOBAL_DF_FISICA = ss.df_fisica
-            st.success("✅ Bases oficiales listas en memoria (sesión).")
+            "Esta operación se realiza sólo una vez en el servidor y puede tardar varios minutos."
+        ):
+            try:
+                ss.df_digital = cargar_bd_digital_cache()
+                ss.df_fisica = cargar_bd_fisica_cache()
+                ss.bases_ready = True
+                st.success("✅ Bases oficiales listas en memoria.")
+            except Exception as e:
+                st.error(f"No fue posible sincronizar las bases oficiales: {e}")
+                ss.bases_ready = False
+        ss.downloading = False
 
 if not ss.bases_ready:
     st.stop()
@@ -497,7 +483,7 @@ else:
 st.markdown("### Selecciona el modo de búsqueda")
 
 metodo_label = st.radio(
-    "",
+    "Modo de búsqueda",
     (
         "Método A – listado de temáticas (plantilla)",
         "Método B – búsqueda avanzada tipo descubridor (experimental)",
@@ -511,7 +497,7 @@ if ss.metodo == "A":
     with st.expander("🧭 Paso a paso – Método A (listado de temáticas)", expanded=True):
         st.markdown(
             f"""
-**1) Sincronización (obligatoria una sola vez por sesión).**  
+**1) Sincronización (obligatoria una sola vez en el servidor).**  
 Si aún no lo has hecho, usa **“Sincronizar bases de datos oficiales”** o carga las bases desde *Avanzado* en la barra lateral.
 
 **2) Cargue sus temáticas.**  
@@ -529,7 +515,7 @@ Puedes cambiar estas columnas en la sección **Configuración de búsqueda y dup
 
 **5) Ejecute la búsqueda.**  
 Pulse **“🚀 Iniciar búsqueda (Método A)”**. Verá una tabla con los resultados (vista de hasta 200 filas por defecto).  
-Podrá **filtrar**, **marcar filas** y **exportar** en CSV/XLSX o **citas APA** (beta).
+Podrá **filtrar**, **marcar filas** y **exportar** en CSV/XLSX o **citas APA** para los títulos seleccionados.
 
 **6) Exportaciones y bitácora.**  
 El Excel incluye la **bitácora por término** y resalta coincidencias con **términos a excluir**.  
@@ -567,7 +553,7 @@ Las condiciones se aplican en orden, sobre la misma tabla de resultados:
 
 **4) Ejecute la búsqueda avanzada.**  
 Pulse **“🚀 Iniciar búsqueda avanzada (Método B)”**. Verá una tabla con los títulos coincidentes.  
-Podrá **filtrar**, **marcar filas** y **exportar** en CSV/XLSX o **citas APA** (beta).
+Podrá **filtrar**, **marcar filas** y **exportar** en CSV/XLSX o **citas APA**.
 
 **5) Nueva búsqueda.**  
 Use el botón **“Nueva búsqueda”** para limpiar condiciones y resultados, sin volver a sincronizar las bases.
@@ -633,18 +619,13 @@ def ejecutar_busqueda_metodo_a(col_busq1: str, col_busq2: str, col_dup_dig: str,
         for i, row in tem.iterrows():
             term = normalize_text(row["termino"])
             if term:
-                m1 = DF_D[col_busq1].map(
-                    lambda s: term in normalize_text(s)
-                ) if fuente == "Digital" else DF_F[col_busq1].map(
+                m1 = df[col_busq1].map(
                     lambda s: term in normalize_text(s)
                 )
-                m2 = DF_D[col_busq2].map(
-                    lambda s: term in normalize_text(s)
-                ) if fuente == "Digital" else DF_F[col_busq2].map(
+                m2 = df[col_busq2].map(
                     lambda s: term in normalize_text(s)
                 )
-                src = DF_D if fuente == "Digital" else DF_F
-                md = src[m1 | m2].copy()
+                md = df[m1 | m2].copy()
                 if not md.empty:
                     md["Temática"] = row["termino"]
                     md["Temática normalizada"] = row["normalizado"]
