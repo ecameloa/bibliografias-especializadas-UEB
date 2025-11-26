@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v8.2 – Métodos A/B, UI refinada, instrucciones por método
+# v8.2.3 – Métodos A/B, UI refinada, instrucciones por método
 
 import io
 import os
@@ -11,6 +11,7 @@ from typing import List, Dict, Any
 import pandas as pd
 import requests
 import streamlit as st
+import re
 
 # ---------------------------------- CONFIGURACIÓN BÁSICA ----------------------------------
 st.set_page_config(page_title="Herramienta de bibliografías", layout="wide")
@@ -541,9 +542,9 @@ Seleccione las colecciones a incluir (Digital/Física) y, si lo desea, limite po
 
 **3) Construya las condiciones.**  
 Cada condición tiene:
-- un **conector** (primera, Y / AND, O / OR, NO / NOT),  
+- un **operador booleano** (primera, Y / AND, O / OR, NO / NOT),  
 - un **campo** (Título, Autor(es), Temáticas, Editorial, Cualquier campo),  
-- un **operador** (contiene / no contiene) y  
+- un **tipo de coincidencia** (contiene la expresión, palabra completa, es igual a) y  
 - un **valor** de búsqueda.
 
 Las condiciones se aplican en orden, sobre la misma tabla de resultados:
@@ -735,15 +736,45 @@ CAMPOS_B = {
     "Año de Publicación": "Año de Publicación",
 }
 
-OPERADORES_B = ["Contiene", "No contiene"]
+# Tipo de coincidencia sobre el campo de texto
+OPERADORES_B = [
+    "Contiene la expresión",
+    "Palabra completa",
+    "Es igual a",
+]
+
+# Operadores booleanos (entre condiciones)
 CONECTORES_B = ["(primera)", "Y (AND)", "O (OR)", "NO (NOT)"]
 
 
 def _mask_condicion(base: pd.DataFrame, campo: str | None, operador: str, valor: str):
     """
     Genera una máscara booleana para una condición simple sobre `base`.
+    `operador` indica el tipo de coincidencia de texto (no el operador booleano).
     """
     val_norm = normalize_text(valor).lower()
+
+    def _match_series(series: pd.Series) -> pd.Series:
+        series = series.fillna("").astype(str)
+
+        # Normalizamos el texto de cada celda sólo una vez
+        def _norm(s: str) -> str:
+            return normalize_text(s).lower()
+
+        if operador == "Contiene la expresión":
+            return series.map(lambda x: val_norm in _norm(x))
+        elif operador == "Palabra completa":
+            # Coincidencia por palabra completa (tokens alfanuméricos)
+            return series.map(
+                lambda x: val_norm
+                in re.findall(r"\w+", _norm(x), flags=re.UNICODE)
+            )
+        elif operador == "Es igual a":
+            # Coincidencia exacta del texto completo normalizado
+            return series.map(lambda x: _norm(x) == val_norm)
+        else:
+            # Por defecto, nos comportamos como "Contiene la expresión"
+            return series.map(lambda x: val_norm in _norm(x))
 
     if campo is None:
         series_list = []
@@ -756,28 +787,17 @@ def _mask_condicion(base: pd.DataFrame, campo: str | None, operador: str, valor:
             "Base de datos",
         ]:
             if c in base.columns:
-                s = base[c].fillna("").astype(str).map(
-                    lambda x: val_norm in normalize_text(x).lower()
-                )
-                series_list.append(s)
+                series_list.append(_match_series(base[c]))
         if not series_list:
-            mask = pd.Series(False, index=base.index)
-        else:
-            mask = series_list[0]
-            for s in series_list[1:]:
-                mask = mask | s
+            return pd.Series(False, index=base.index)
+        mask = series_list[0]
+        for s in series_list[1:]:
+            mask = mask | s
+        return mask
     else:
         if campo not in base.columns:
             return pd.Series(False, index=base.index)
-        series = base[campo].fillna("").astype(str)
-        mask = series.map(lambda x: val_norm in normalize_text(x).lower())
-
-    if operador == "Contiene":
-        return mask
-    elif operador == "No contiene":
-        return ~mask
-    else:
-        return mask
+        return _match_series(base[campo])
 
 
 def ejecutar_busqueda_metodo_b(
@@ -820,12 +840,12 @@ def ejecutar_busqueda_metodo_b(
 
         campo_key = cond.get("campo", "Cualquier campo")
         campo_col = CAMPOS_B.get(campo_key)
-        operador = cond.get("operador", "Contiene")
+        operador = cond.get("operador", "Contiene la expresión")
         conector = cond.get("conector", "(primera)")
 
         mask = _mask_condicion(base, campo_col, operador, valor)
 
-        # Primera condición: si el conector es NO se interpreta como "todo menos"
+        # Primera condición: si el operador booleano es NO se interpreta como "todo menos"
         if res is None:
             if conector.startswith("NO"):
                 res = base[~mask].copy()
@@ -1241,7 +1261,7 @@ else:
             {
                 "conector": "(primera)" if len(conds) == 0 else "Y (AND)",
                 "campo": "Título",
-                "operador": "Contiene",
+                "operador": "Contiene la expresión",
                 "valor": "",
             }
         )
@@ -1256,7 +1276,7 @@ else:
         with c1:
             opciones_con = CONECTORES_B if i > 0 else ["(primera)"]
             conds[i]["conector"] = st.selectbox(
-                "Conector",
+                "Operador booleano",
                 options=opciones_con,
                 index=opciones_con.index(conds[i]["conector"])
                 if conds[i]["conector"] in opciones_con
@@ -1274,7 +1294,7 @@ else:
             )
         with c3:
             conds[i]["operador"] = st.selectbox(
-                "Operador",
+                "Tipo de coincidencia",
                 options=OPERADORES_B,
                 index=OPERADORES_B.index(conds[i]["operador"])
                 if conds[i]["operador"] in OPERADORES_B
