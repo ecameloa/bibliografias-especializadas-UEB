@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v8.2.4 – Ajustes Método B, sincronización y columnas ocultas
+# v8.2.4-b – Ajustes sincronización + ocultar columna inicial
 
 import io
 import os
@@ -59,7 +59,7 @@ ss.setdefault("df_digital", None)
 ss.setdefault("df_fisica", None)
 ss.setdefault("bases_ready", False)
 
-ss.setdefault("downloading", False)
+ss.setdefault("downloading", False)          # sólo para deshabilitar controles
 ss.setdefault("descarga_disparada", False)
 
 # Insumos método A
@@ -375,7 +375,7 @@ with st.sidebar:
             st.markdown(f"- [Términos a excluir]({URL_PLANTILLA_EXCLUSION})")
 
             st.markdown("### Archivos auxiliares (obligatorios)")
-            bloqueados = ss.downloading
+            bloqueados = ss.downloading  # mientras sincroniza, no subimos nada extra
 
             tem_up = st.file_uploader(
                 "Temáticas (.xlsx, col1=término, col2=normalizado)",
@@ -479,37 +479,32 @@ if not ss.bases_ready:
         "desde la barra lateral (opción **Avanzado**)."
     )
 
-    if ss.downloading:
-        st.info(
-            "⏳ Sincronizando colecciones **Digital** y **Física**… "
-            "Esta operación puede tardar varios minutos. No cierres esta ventana."
+    mid_col = st.columns([1, 2, 1])[1]
+    with mid_col:
+        btn_sync = st.button(
+            "🔄 Sincronizar bases de datos oficiales",
+            type="primary",
+            use_container_width=True,
+            disabled=ss.downloading,
         )
-    else:
-        mid_col = st.columns([1, 2, 1])[1]
-        with mid_col:
-            btn_sync = st.button(
-                "🔄 Sincronizar bases de datos oficiales",
-                type="primary",
-                use_container_width=True,
-                key="btn_sync",
-            )
 
-        if btn_sync and not ss.downloading:
-            ss.downloading = True
-            ss.descarga_disparada = True
-            with st.spinner(
-                "Sincronizando colecciones **Digital** y **Física**… "
-                "Esta operación se realiza sólo una vez en el servidor y puede tardar varios minutos."
-            ):
-                try:
-                    ss.df_digital = cargar_bd_digital_cache()
-                    ss.df_fisica = cargar_bd_fisica_cache()
-                    ss.bases_ready = True
-                    st.success("✅ Bases oficiales listas en memoria.")
-                except Exception as e:
-                    st.error(f"No fue posible sincronizar las bases oficiales: {e}")
-                    ss.bases_ready = False
-            ss.downloading = False
+    if btn_sync and not ss.downloading:
+        ss.downloading = True
+        ss.descarga_disparada = True
+        # Aquí se verá el spinner estándar de Streamlit + "Running cargar_bd_..."
+        with st.spinner(
+            "Sincronizando colecciones **Digital** y **Física**… "
+            "Esta operación se realiza sólo una vez en el servidor y puede tardar varios minutos."
+        ):
+            try:
+                ss.df_digital = cargar_bd_digital_cache()
+                ss.df_fisica = cargar_bd_fisica_cache()
+                ss.bases_ready = True
+                st.success("✅ Bases oficiales listas en memoria.")
+            except Exception as e:
+                st.error(f"No fue posible sincronizar las bases oficiales: {e}")
+                ss.bases_ready = False
+        ss.downloading = False
 
 if not ss.bases_ready:
     st.stop()
@@ -585,7 +580,7 @@ else:
         "Las instrucciones rápidas están en la barra lateral izquierda."
     )
 
-# ---------------------------------- NUEVA BÚSQUEDA (limpia insumos/resultados, NO bases) ----------------------------------
+# ---------------------------------- NUEVA BÚSQUEDA ----------------------------------
 col_nb = st.columns([1, 1, 4])[0]
 with col_nb:
     if st.button("🧪 Nueva búsqueda", use_container_width=True):
@@ -599,7 +594,6 @@ with col_nb:
             ss[k] = None if k != "b_conds" else []
         ss.b_num_cond = 2
         st.toast("Listo. Carga nuevos términos o ajusta las condiciones para buscar de nuevo.")
-
 
 # ==========================================================================================
 # MÉTODO A – LISTADO DE TEMÁTICAS
