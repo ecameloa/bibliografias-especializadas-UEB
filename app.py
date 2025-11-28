@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v8.2.4 – Correcciones UX/Método B y limpieza de columnas (Autor(es) corregido)
+# v8.2.4 – Ajustes Método B, sincronización y columnas ocultas
 
 import io
 import os
@@ -224,6 +224,9 @@ def _prepara_columnas(df: pd.DataFrame, cols: List[str]):
 
 
 def _prep_export(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Renombra columnas y elimina las administrativas antes de exportar.
+    """
     out = df.copy()
     out = out.rename(
         columns={k: v for k, v in EXPORT_RENAME.items() if k in out.columns}
@@ -233,12 +236,16 @@ def _prep_export(df: pd.DataFrame) -> pd.DataFrame:
 
     drop_cols = [c for c in out.columns if c in EXPORT_DROP_COLS]
     drop_cols += [c for c in out.columns if c.startswith("Unnamed")]
+    drop_cols += [c for c in out.columns if not str(c).strip()]  # columnas sin nombre
     if drop_cols:
         out = out.drop(columns=list(dict.fromkeys(drop_cols)))
     return out.fillna("")
 
 
 def _clean_field(value: Any) -> str:
+    """
+    Limpia campos para citas APA: elimina vacíos, 'nan', 'NO APLICA', etc.
+    """
     if value is None:
         return ""
     v = str(value).strip()
@@ -252,8 +259,12 @@ def _clean_field(value: Any) -> str:
 
 
 def build_apa(row: pd.Series) -> str:
+    """
+    Generador APA simplificado usando los campos disponibles.
+    """
     tit = _clean_field(row.get("Título", ""))
 
+    # Autor(es) puede venir con o sin espacio final
     aut = ""
     for col in ["Autor(es)", "Autor(es) "]:
         if col in row.index:
@@ -306,6 +317,10 @@ def build_apa(row: pd.Series) -> str:
 # --------- CARGA CACHEADA DE LAS BASES OFICIALES (COMPARTIDA ENTRE SESIONES) ----------
 @st.cache_data(show_spinner=True)
 def cargar_bd_digital_cache() -> pd.DataFrame:
+    """
+    Descarga y carga la BD de colección Digital.
+    Se ejecuta sólo la primera vez en el servidor; luego se sirve desde caché.
+    """
     resp = requests.get(URL_DIGITAL, headers=UA, timeout=600)
     resp.raise_for_status()
     bio = io.BytesIO(resp.content)
@@ -315,6 +330,10 @@ def cargar_bd_digital_cache() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=True)
 def cargar_bd_fisica_cache() -> pd.DataFrame:
+    """
+    Descarga y carga la BD de colección Física.
+    Se ejecuta sólo la primera vez en el servidor; luego se sirve desde caché.
+    """
     resp = requests.get(URL_FISICA, headers=UA, timeout=600)
     resp.raise_for_status()
     bio = io.BytesIO(resp.content)
@@ -322,6 +341,7 @@ def cargar_bd_fisica_cache() -> pd.DataFrame:
     return df
 
 
+# CSS para cambiar el texto de "Browse files" (mejor esfuerzo)
 st.markdown(
     """
 <style>
@@ -347,6 +367,7 @@ with st.sidebar:
         "Elaborado por David Camelo para la Biblioteca de la Universidad El Bosque"
     )
 
+    # Bloques laterales sólo cuando las bases ya están listas
     if ss.bases_ready:
         if ss.metodo == "A":
             st.markdown("### Plantillas oficiales (Método A)")
@@ -408,6 +429,7 @@ with st.sidebar:
         )
 
     st.markdown("---")
+    # Subir bases manualmente sólo si aún no se han cargado/sincronizado
     if not ss.bases_ready:
         with st.expander(
             "➕ Avanzado: subir bases Digital/Física manualmente", expanded=False
@@ -436,6 +458,7 @@ with st.sidebar:
 # ---------------------------------- CUERPO PRINCIPAL ----------------------------------
 st.title("Herramienta para la elaboración de bibliografías especializadas")
 
+# --- Bloque de información general ---
 with st.expander("ℹ️ Información general", expanded=True):
     st.markdown(
         f"""
@@ -447,6 +470,7 @@ with st.expander("ℹ️ Información general", expanded=True):
         """
     )
 
+# --- Sincronización de bases ---
 st.markdown("#### Bases de datos de las colecciones de la Biblioteca")
 
 if not ss.bases_ready:
@@ -455,31 +479,37 @@ if not ss.bases_ready:
         "desde la barra lateral (opción **Avanzado**)."
     )
 
-    mid_col = st.columns([1, 2, 1])[1]
-    with mid_col:
-        btn_sync = st.button(
-            "🔄 Sincronizar bases de datos oficiales",
-            type="primary",
-            use_container_width=True,
-            disabled=ss.downloading,
+    if ss.downloading:
+        st.info(
+            "⏳ Sincronizando colecciones **Digital** y **Física**… "
+            "Esta operación puede tardar varios minutos. No cierres esta ventana."
         )
+    else:
+        mid_col = st.columns([1, 2, 1])[1]
+        with mid_col:
+            btn_sync = st.button(
+                "🔄 Sincronizar bases de datos oficiales",
+                type="primary",
+                use_container_width=True,
+                key="btn_sync",
+            )
 
-    if btn_sync and not ss.downloading:
-        ss.downloading = True
-        ss.descarga_disparada = True
-        with st.spinner(
-            "Sincronizando colecciones **Digital** y **Física**… "
-            "Esta operación se realiza sólo una vez en el servidor y puede tardar varios minutos."
-        ):
-            try:
-                ss.df_digital = cargar_bd_digital_cache()
-                ss.df_fisica = cargar_bd_fisica_cache()
-                ss.bases_ready = True
-                st.success("✅ Bases oficiales listas en memoria.")
-            except Exception as e:
-                st.error(f"No fue posible sincronizar las bases oficiales: {e}")
-                ss.bases_ready = False
-        ss.downloading = False
+        if btn_sync and not ss.downloading:
+            ss.downloading = True
+            ss.descarga_disparada = True
+            with st.spinner(
+                "Sincronizando colecciones **Digital** y **Física**… "
+                "Esta operación se realiza sólo una vez en el servidor y puede tardar varios minutos."
+            ):
+                try:
+                    ss.df_digital = cargar_bd_digital_cache()
+                    ss.df_fisica = cargar_bd_fisica_cache()
+                    ss.bases_ready = True
+                    st.success("✅ Bases oficiales listas en memoria.")
+                except Exception as e:
+                    st.error(f"No fue posible sincronizar las bases oficiales: {e}")
+                    ss.bases_ready = False
+            ss.downloading = False
 
 if not ss.bases_ready:
     st.stop()
@@ -487,8 +517,10 @@ else:
     st.success("✅ Bases oficiales listas en memoria (sesión).")
 
 
+# ---------------------------------- SELECCIÓN DE MÉTODO ----------------------------------
 st.markdown("### Selecciona el modo de búsqueda")
 
+prev_metodo = ss.metodo
 metodo_label = st.radio(
     "Modo de búsqueda",
     (
@@ -497,8 +529,23 @@ metodo_label = st.radio(
     ),
     index=0 if ss.metodo == "A" else 1,
 )
-ss.metodo = "A" if metodo_label.startswith("Método A") else "B"
+new_metodo = "A" if metodo_label.startswith("Método A") else "B"
 
+# Si el usuario cambia de método, limpiamos estado de búsqueda (como si fuera "Nueva búsqueda")
+if new_metodo != prev_metodo:
+    for k in (
+        "tematicas_df",
+        "excluir_df",
+        "results_df",
+        "bitacora_df",
+        "b_conds",
+    ):
+        ss[k] = None if k != "b_conds" else []
+    ss.b_num_cond = 2
+
+ss.metodo = new_metodo
+
+# --- Paso a paso según método ---
 if ss.metodo == "A":
     with st.expander("🧭 Paso a paso – Método A (listado de temáticas)", expanded=True):
         st.markdown(
@@ -538,6 +585,7 @@ else:
         "Las instrucciones rápidas están en la barra lateral izquierda."
     )
 
+# ---------------------------------- NUEVA BÚSQUEDA (limpia insumos/resultados, NO bases) ----------------------------------
 col_nb = st.columns([1, 1, 4])[0]
 with col_nb:
     if st.button("🧪 Nueva búsqueda", use_container_width=True):
@@ -549,11 +597,12 @@ with col_nb:
             "b_conds",
         ):
             ss[k] = None if k != "b_conds" else []
+        ss.b_num_cond = 2
         st.toast("Listo. Carga nuevos términos o ajusta las condiciones para buscar de nuevo.")
 
 
 # ==========================================================================================
-# MÉTODO A
+# MÉTODO A – LISTADO DE TEMÁTICAS
 # ==========================================================================================
 def ejecutar_busqueda_metodo_a(col_busq1: str, col_busq2: str, col_dup_dig: str, col_dup_fis: str):  # noqa: E501
     if ss.tematicas_df is None or ss.excluir_df is None:
@@ -569,11 +618,18 @@ def ejecutar_busqueda_metodo_a(col_busq1: str, col_busq2: str, col_dup_dig: str,
     DF_D = ss.df_digital.copy()
     DF_F = ss.df_fisica.copy()
 
+    # Asegurar columnas como texto
     _prepara_columnas(DF_D, [col_busq1, col_busq2, col_dup_dig])
     _prepara_columnas(DF_F, [col_busq1, col_busq2, col_dup_fis])
 
-    def _buscar(df, fuente, tem_df, offset, total_steps):
-        res_list = []
+    def _buscar(
+        df: pd.DataFrame,
+        fuente: str,
+        tem_df: pd.DataFrame,
+        offset: int,
+        total_steps: int,
+    ) -> pd.DataFrame:
+        res_list: list[pd.DataFrame] = []
         tem = tem_df.copy()
         tem["termino"] = tem["termino"].astype(str).fillna("")
         tem["normalizado"] = tem["normalizado"].astype(str).fillna("")
@@ -583,8 +639,12 @@ def ejecutar_busqueda_metodo_a(col_busq1: str, col_busq2: str, col_dup_dig: str,
         for i, row in tem.iterrows():
             term = normalize_text(row["termino"])
             if term:
-                m1 = df[col_busq1].map(lambda s: term in normalize_text(s))
-                m2 = df[col_busq2].map(lambda s: term in normalize_text(s))
+                m1 = df[col_busq1].map(
+                    lambda s: term in normalize_text(s)
+                )
+                m2 = df[col_busq2].map(
+                    lambda s: term in normalize_text(s)
+                )
                 md = df[m1 | m2].copy()
                 if not md.empty:
                     md["Temática"] = row["termino"]
@@ -611,8 +671,20 @@ def ejecutar_busqueda_metodo_a(col_busq1: str, col_busq2: str, col_dup_dig: str,
         return pd.DataFrame()
 
     total = len(ss.tematicas_df) * 2
-    res_d = _buscar(DF_D, "Digital", ss.tematicas_df, 0, total)
-    res_f = _buscar(DF_F, "Física", ss.tematicas_df, len(ss.tematicas_df), total)
+    res_d = _buscar(
+        DF_D,
+        "Digital",
+        ss.tematicas_df,
+        offset=0,
+        total_steps=total,
+    )
+    res_f = _buscar(
+        DF_F,
+        "Física",
+        ss.tematicas_df,
+        offset=len(ss.tematicas_df),
+        total_steps=total,
+    )
 
     if not res_d.empty and col_dup_dig in res_d.columns:
         res_d = res_d.drop_duplicates(subset=[col_dup_dig], keep="first")
@@ -627,6 +699,7 @@ def ejecutar_busqueda_metodo_a(col_busq1: str, col_busq2: str, col_dup_dig: str,
 
     ss.results_df = res
 
+    # --- bitácora por término ---
     tem = (
         ss.tematicas_df[["termino", "normalizado"]]
         .drop_duplicates()
@@ -682,16 +755,22 @@ CAMPOS_B = {
     "Año de Publicación": "Año de Publicación",
 }
 
+# Tipo de coincidencia sobre el campo de texto
 OPERADORES_B = [
     "Contiene la expresión",
     "Palabra completa",
     "Es igual a",
 ]
 
+# Operadores booleanos (entre condiciones)
 CONECTORES_B = ["(primera)", "Y (AND)", "O (OR)", "NO (NOT)"]
 
 
 def _mask_condicion(base: pd.DataFrame, campo: str | None, operador: str, valor: str):
+    """
+    Genera una máscara booleana para una condición simple sobre `base`.
+    `operador` indica el tipo de coincidencia de texto (no el operador booleano).
+    """
     val_norm = normalize_text(valor).lower()
 
     def _match_series(series: pd.Series) -> pd.Series:
@@ -703,13 +782,16 @@ def _mask_condicion(base: pd.DataFrame, campo: str | None, operador: str, valor:
         if operador == "Contiene la expresión":
             return series.map(lambda x: val_norm in _norm(x))
         elif operador == "Palabra completa":
+            # Coincidencia por palabra completa (tokens alfanuméricos)
             return series.map(
                 lambda x: val_norm
                 in re.findall(r"\w+", _norm(x), flags=re.UNICODE)
             )
         elif operador == "Es igual a":
+            # Coincidencia exacta del texto completo normalizado
             return series.map(lambda x: _norm(x) == val_norm)
         else:
+            # Por defecto, nos comportamos como "Contiene la expresión"
             return series.map(lambda x: val_norm in _norm(x))
 
     if campo is None:
@@ -741,7 +823,10 @@ def ejecutar_busqueda_metodo_b(
     tipos_sel: list[str],
     condiciones: List[Dict[str, Any]],
 ):
-    condiciones = [c for c in condiciones if c.get("valor", "").strip()]
+    # Filtrar condiciones con valor no vacío (protección adicional)
+    condiciones = [
+        c for c in condiciones if c.get("valor", "").strip()
+    ]
     if not condiciones:
         st.warning(
             "Debes indicar al menos un valor de búsqueda en las condiciones antes de ejecutar "
@@ -749,6 +834,7 @@ def ejecutar_busqueda_metodo_b(
         )
         return
 
+    # Construir tabla base Digital + Física
     DF_D = ss.df_digital.copy()
     DF_F = ss.df_fisica.copy()
     DF_D["Fuente"] = "Digital"
@@ -761,6 +847,7 @@ def ejecutar_busqueda_metodo_b(
     if tipos_sel and TIPO_NORMAL_COL in base.columns:
         base = base[base[TIPO_NORMAL_COL].isin(tipos_sel)]
 
+    # Nos aseguramos que todas las columnas relevantes sean texto
     _prepara_columnas(
         base,
         [
@@ -783,7 +870,7 @@ def ejecutar_busqueda_metodo_b(
         campo_key = cond.get("campo", "Cualquier campo")
         campo_col = CAMPOS_B.get(campo_key)
 
-        # --- Ajuste especial para Autor(es): puede ser "Autor(es)" o "Autor(es) " ---
+        # Ajuste especial para Autor(es): puede ser "Autor(es)" o "Autor(es) "
         if campo_key == "Autor(es)":
             if "Autor(es)" in base.columns:
                 campo_col = "Autor(es)"
@@ -791,13 +878,13 @@ def ejecutar_busqueda_metodo_b(
                 campo_col = "Autor(es) "
             else:
                 campo_col = None
-        # -----------------------------------------------------------------------------  # noqa: E501
 
         operador = cond.get("operador", "Contiene la expresión")
         conector = cond.get("conector", "(primera)")
 
         mask = _mask_condicion(base, campo_col, operador, valor)
 
+        # Primera condición
         if res is None:
             if conector.startswith("NO"):
                 res = base[~mask].copy()
@@ -805,6 +892,7 @@ def ejecutar_busqueda_metodo_b(
                 res = base[mask].copy()
             continue
 
+        # Resto de condiciones
         if conector.startswith("Y"):
             submask = mask.loc[res.index]
             res = res[submask].copy()
@@ -845,12 +933,16 @@ def render_resultados(con_bitacora: bool):
 
     res = ss.results_df.copy()
 
-    cols_to_hide = [c for c in res.columns if c.startswith("Unnamed")]
+    # Ocultar columnas internas: Unnamed*, sin nombre, Prioridad Búsqueda
+    cols_to_hide = [
+        c for c in res.columns if c.startswith("Unnamed") or not str(c).strip()
+    ]
     if "Prioridad Búsqueda" in res.columns:
         cols_to_hide.append("Prioridad Búsqueda")
     if cols_to_hide:
         res = res.drop(columns=list(dict.fromkeys(cols_to_hide)), errors="ignore")
 
+    # Filtros rápidos
     if ss.metodo == "A":
         colf1, colf2, colf3 = st.columns([1, 1, 2])
     else:
@@ -903,6 +995,7 @@ def render_resultados(con_bitacora: bool):
 
     st.caption(f"Filas totales (después de filtros): **{len(res):,}**")
 
+    # Columna de selección
     res_view = res.copy()
     if "__Seleccionar__" not in res_view.columns:
         res_view.insert(0, "__Seleccionar__", False)
@@ -938,9 +1031,11 @@ def render_resultados(con_bitacora: bool):
     )
     st.caption(f"Seleccionados en la vista: **{len(seleccionados):,}**")
 
+    # ---------------------------------- Exportaciones ----------------------------------
     st.markdown("##### Exportaciones")
     colx1, colx2, colx3, colx4, colx5 = st.columns([1.2, 1.2, 1.6, 1.6, 2])
 
+    # CSV completo (filtrado)
     with colx1:
         st.download_button(
             "⬇️ CSV (todo lo filtrado)",
@@ -950,6 +1045,7 @@ def render_resultados(con_bitacora: bool):
             use_container_width=True,
         )
 
+    # CSV de seleccionados
     with colx2:
         st.download_button(
             "⬇️ CSV (solo seleccionados)",
@@ -964,6 +1060,7 @@ def render_resultados(con_bitacora: bool):
             use_container_width=True,
         )
 
+    # Excel completo
     with colx3:
         import xlsxwriter  # noqa: F401
 
@@ -974,6 +1071,7 @@ def render_resultados(con_bitacora: bool):
         res_x.to_excel(writer, index=False, sheet_name="Resultados")
 
         if con_bitacora:
+            # Resaltado por términos a excluir (sólo Método A)
             if ss.excluir_df is not None:
                 wb = writer.book
                 ws = writer.sheets["Resultados"]
@@ -1032,6 +1130,7 @@ def render_resultados(con_bitacora: bool):
                 use_container_width=True,
             )
 
+    # Excel de seleccionados
     with colx4:
         if not seleccionados.empty:
             sel_x = _prep_export(seleccionados)
@@ -1057,6 +1156,7 @@ def render_resultados(con_bitacora: bool):
                 use_container_width=True,
             )
 
+    # Citas APA para seleccionados
     with colx5:
         if not seleccionados.empty:
             citas = [build_apa(r) for _, r in seleccionados.iterrows()]
@@ -1083,6 +1183,7 @@ def render_resultados(con_bitacora: bool):
 # LÓGICA PRINCIPAL POR MÉTODO
 # ==========================================================================================
 if ss.metodo == "A":
+    # --- Validaciones Método A ---
     if ss.tematicas_df is None or ss.excluir_df is None:
         st.warning(
             "Para usar el **Método A** debes cargar **Temáticas** y **Términos a excluir** "
@@ -1151,6 +1252,7 @@ if ss.metodo == "A":
             except Exception as e:
                 st.error(f"Ocurrió un problema durante la búsqueda: {e}")
 
+        # Mostrar resultados y bitácora
         render_resultados(con_bitacora=True)
 
         st.subheader("📑 Bitácora por término")
@@ -1167,8 +1269,10 @@ if ss.metodo == "A":
             )
 
 else:
+    # ======================= MÉTODO B ==========================
     st.subheader("Búsqueda avanzada (Método B – experimental)")
 
+    # Alcance de búsqueda
     colc1, colc2 = st.columns([1, 1])
     with colc1:
         colecciones = st.multiselect(
@@ -1177,6 +1281,7 @@ else:
             default=["Digital", "Física"],
         )
     with colc2:
+        # tipos normalizados disponibles
         todos_tipos = sorted(
             pd.concat([ss.df_digital, ss.df_fisica], ignore_index=True)
             .get(TIPO_NORMAL_COL, pd.Series(dtype=str))
@@ -1187,7 +1292,7 @@ else:
         tipos_sel = st.multiselect(
             "Tipo de ítem normalizado",
             options=todos_tipos,
-            default=todos_tipos,
+            default=todos_tipos,  # por defecto TODOS
         )
 
     st.markdown(
@@ -1195,6 +1300,7 @@ else:
         "**O (OR)** o **NO (NOT)**."
     )
 
+    # Número de condiciones
     ss.b_num_cond = int(
         st.number_input(
             "Número de condiciones",
@@ -1205,6 +1311,7 @@ else:
         )
     )
 
+    # Asegurar lista de condiciones en estado
     conds: List[Dict[str, Any]] = ss.b_conds or []
     while len(conds) < ss.b_num_cond:
         conds.append(
@@ -1218,6 +1325,7 @@ else:
     if len(conds) > ss.b_num_cond:
         conds = conds[: ss.b_num_cond]
 
+    # Render de cada condición
     for i in range(ss.b_num_cond):
         st.markdown(f"**Condición {i+1}**")
         c1, c2, c3, c4 = st.columns([1, 1, 1, 3])
@@ -1266,6 +1374,7 @@ else:
         type="primary",
         use_container_width=True,
     ):
+        # Validación: no permitir condiciones en blanco
         valores = [c.get("valor", "").strip() for c in conds]
         if any(v == "" for v in valores):
             st.warning(
@@ -1284,4 +1393,5 @@ else:
             except Exception as e:
                 st.error(f"Ocurrió un problema durante la búsqueda avanzada: {e}")
 
+    # Resultados sin bitácora ni resaltado especial
     render_resultados(con_bitacora=False)
