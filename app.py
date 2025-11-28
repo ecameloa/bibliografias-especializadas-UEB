@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v8.2.4-b – Ajustes sincronización + ocultar columna inicial
+# v8.2.4 – Ajustes Método B, sincronización y columnas ocultas
 
 import io
 import os
@@ -58,9 +58,6 @@ ss = st.session_state
 ss.setdefault("df_digital", None)
 ss.setdefault("df_fisica", None)
 ss.setdefault("bases_ready", False)
-
-ss.setdefault("downloading", False)          # sólo para deshabilitar controles
-ss.setdefault("descarga_disparada", False)
 
 # Insumos método A
 ss.setdefault("tematicas_df", None)
@@ -375,38 +372,34 @@ with st.sidebar:
             st.markdown(f"- [Términos a excluir]({URL_PLANTILLA_EXCLUSION})")
 
             st.markdown("### Archivos auxiliares (obligatorios)")
-            bloqueados = ss.downloading  # mientras sincroniza, no subimos nada extra
 
             tem_up = st.file_uploader(
                 "Temáticas (.xlsx, col1=término, col2=normalizado)",
                 type=["xlsx"],
                 key="tem_up_v82",
-                disabled=bloqueados,
             )
             exc_up = st.file_uploader(
                 "Términos a excluir (.xlsx, col1)",
                 type=["xlsx"],
                 key="exc_up_v82",
-                disabled=bloqueados,
             )
 
-            if not bloqueados:
-                if tem_up is not None:
-                    df = safe_read_excel(tem_up, "Temáticas")
-                    ss.tematicas_df = df[[df.columns[0], df.columns[1]]].rename(
-                        columns={
-                            df.columns[0]: "termino",
-                            df.columns[1]: "normalizado",
-                        }
-                    ).fillna("")
-                    st.success(f"Temáticas cargadas: {len(ss.tematicas_df)}")
+            if tem_up is not None:
+                df = safe_read_excel(tem_up, "Temáticas")
+                ss.tematicas_df = df[[df.columns[0], df.columns[1]]].rename(
+                    columns={
+                        df.columns[0]: "termino",
+                        df.columns[1]: "normalizado",
+                    }
+                ).fillna("")
+                st.success(f"Temáticas cargadas: {len(ss.tematicas_df)}")
 
-                if exc_up is not None:
-                    df = safe_read_excel(exc_up, "Términos a excluir")
-                    ss.excluir_df = df[[df.columns[0]]].rename(
-                        columns={df.columns[0]: "excluir"}
-                    ).fillna("")
-                    st.success(f"Términos a excluir cargados: {len(ss.excluir_df)}")
+            if exc_up is not None:
+                df = safe_read_excel(exc_up, "Términos a excluir")
+                ss.excluir_df = df[[df.columns[0]]].rename(
+                    columns={df.columns[0]: "excluir"}
+                ).fillna("")
+                st.success(f"Términos a excluir cargados: {len(ss.excluir_df)}")
         else:
             st.markdown("### Instrucciones rápidas – Método B")
             st.markdown(
@@ -485,12 +478,9 @@ if not ss.bases_ready:
             "🔄 Sincronizar bases de datos oficiales",
             type="primary",
             use_container_width=True,
-            disabled=ss.downloading,
         )
 
-    if btn_sync and not ss.downloading:
-        ss.downloading = True
-        ss.descarga_disparada = True
+    if btn_sync:
         # Aquí se verá el spinner estándar de Streamlit + "Running cargar_bd_..."
         with st.spinner(
             "Sincronizando colecciones **Digital** y **Física**… "
@@ -504,7 +494,6 @@ if not ss.bases_ready:
             except Exception as e:
                 st.error(f"No fue posible sincronizar las bases oficiales: {e}")
                 ss.bases_ready = False
-        ss.downloading = False
 
 if not ss.bases_ready:
     st.stop()
