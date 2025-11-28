@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v8.2.3 – Métodos A/B, UI refinada, instrucciones por método
+# v8.2.4 – Correcciones UX/Método B y limpieza de columnas
 
 import io
 import os
@@ -60,7 +60,7 @@ ss.setdefault("df_fisica", None)
 ss.setdefault("bases_ready", False)
 
 ss.setdefault("downloading", False)
-ss.setdefault("descarga_disparada", False)  # ya casi no lo usamos, pero lo dejamos
+ss.setdefault("descarga_disparada", False)
 
 # Insumos método A
 ss.setdefault("tematicas_df", None)
@@ -75,7 +75,7 @@ ss.setdefault("metodo", "A")
 
 # Estado método B
 ss.setdefault("b_num_cond", 2)
-ss.setdefault("b_conds", [])  # lista de dicts con los parámetros de cada condición
+ss.setdefault("b_conds", [])
 
 
 # ---------------------------------- UTILIDADES ----------------------------------
@@ -237,39 +237,59 @@ def _prep_export(df: pd.DataFrame) -> pd.DataFrame:
     )
     if "Url en LOCATE/IDEA" in out.columns and "Url de acceso" not in out.columns:
         out = out.rename(columns={"Url en LOCATE/IDEA": "Url de acceso"})
+
     drop_cols = [c for c in EXPORT_DROP_COLS if c in out.columns]
+    # Quitar columnas de índice tipo "Unnamed: 0"
+    drop_cols += [c for c in out.columns if c.startswith("Unnamed")]
     if drop_cols:
-        out = out.drop(columns=drop_cols)
+        # dict.fromkeys para evitar duplicados
+        out = out.drop(columns=list(dict.fromkeys(drop_cols)))
     return out.fillna("")
+
+
+def _clean_field(value: Any) -> str:
+    """
+    Limpia campos para citas APA: elimina vacíos, 'nan', 'NO APLICA', etc.
+    """
+    if value is None:
+        return ""
+    v = str(value).strip()
+    if not v:
+        return ""
+    if v.lower() in ("nan", "none", "null"):
+        return ""
+    if v.upper() in ("NO APLICA", "N/A"):
+        return ""
+    return v
 
 
 def build_apa(row: pd.Series) -> str:
     """
     Generador APA simplificado usando los campos disponibles.
     """
-    tit = str(row.get("Título", "")).strip()
+    tit = _clean_field(row.get("Título", ""))
 
     # Autor(es) puede venir con o sin espacio final
     aut = ""
     for col in ["Autor(es)", "Autor(es) "]:
         if col in row.index:
-            val = str(row.get(col, "")).strip()
-            if val and val.upper() != "NO APLICA":
-                aut = val
+            cand = _clean_field(row.get(col, ""))
+            if cand:
+                aut = cand
                 break
 
-    edit = str(row.get("Editorial", "")).strip()
-    anio = str(row.get("Año de Publicación", "")).strip()
-    bd = str(row.get("Base de datos", "")).strip()
-    url = str(row.get("Url OA", "") or row.get("Url de acceso", "")).strip()
-    isbn = str(row.get("ISBN", "")).strip()
-    issn = str(row.get("ISSN1", "")).strip()
-    topog = str(row.get("No. Topográfico", "")).strip()
+    edit = _clean_field(row.get("Editorial", ""))
+    anio = _clean_field(row.get("Año de Publicación", ""))
+    bd = _clean_field(row.get("Base de datos", ""))
+    url = _clean_field(row.get("Url OA", "") or row.get("Url de acceso", ""))
+    isbn = _clean_field(row.get("ISBN", ""))
+    issn = _clean_field(row.get("ISSN1", ""))
+    topog = _clean_field(row.get("No. Topográfico", ""))
 
     partes: list[str] = []
     if aut:
         partes.append(f"{aut}.")
-    if anio and anio.upper() != "NO APLICA":
+    if anio:
         partes.append(f"({anio}).")
     if tit:
         partes.append(f"{tit}.")
@@ -283,15 +303,15 @@ def build_apa(row: pd.Series) -> str:
         acc.append(f"Disponible en {bd}")
     if url:
         acc.append(url)
-    if topog and topog.upper() != "NO APLICA":
+    if topog:
         acc.append(f"No. Topográfico: {topog}")
     if acc:
         partes.append("; ".join(acc) + ".")
 
     extras: list[str] = []
-    if isbn and isbn.upper() != "NO APLICA":
+    if isbn:
         extras.append(f"ISBN: {isbn}")
-    if issn and issn.upper() != "NO APLICA":
+    if issn:
         extras.append(f"ISSN: {issn}")
     if extras:
         partes.append(" ".join(extras) + ".")
@@ -352,49 +372,65 @@ with st.sidebar:
         "Elaborado por David Camelo para la Biblioteca de la Universidad El Bosque"
     )
 
-    st.markdown("### Plantillas oficiales:")
-    st.markdown(f"- [Temáticas]({URL_PLANTILLA_TEMATICAS})")
-    st.markdown(f"- [Términos a excluir]({URL_PLANTILLA_EXCLUSION})")
+    # Bloques laterales sólo cuando las bases ya están listas
+    if ss.bases_ready:
+        if ss.metodo == "A":
+            st.markdown("### Plantillas oficiales (Método A)")
+            st.markdown(f"- [Temáticas]({URL_PLANTILLA_TEMATICAS})")
+            st.markdown(f"- [Términos a excluir]({URL_PLANTILLA_EXCLUSION})")
 
-    # Archivos auxiliares sólo para Método A
-    if ss.metodo == "A":
-        st.markdown("### Archivos auxiliares (obligatorios)")
-        bloqueados = ss.downloading or (not ss.bases_ready and ss.descarga_disparada)
+            st.markdown("### Archivos auxiliares (obligatorios)")
+            bloqueados = ss.downloading
 
-        tem_up = st.file_uploader(
-            "Temáticas (.xlsx, col1=término, col2=normalizado)",
-            type=["xlsx"],
-            key="tem_up_v82",
-            disabled=bloqueados,
-        )
-        exc_up = st.file_uploader(
-            "Términos a excluir (.xlsx, col1)",
-            type=["xlsx"],
-            key="exc_up_v82",
-            disabled=bloqueados,
-        )
+            tem_up = st.file_uploader(
+                "Temáticas (.xlsx, col1=término, col2=normalizado)",
+                type=["xlsx"],
+                key="tem_up_v82",
+                disabled=bloqueados,
+            )
+            exc_up = st.file_uploader(
+                "Términos a excluir (.xlsx, col1)",
+                type=["xlsx"],
+                key="exc_up_v82",
+                disabled=bloqueados,
+            )
 
-        if not bloqueados:
-            if tem_up is not None:
-                df = safe_read_excel(tem_up, "Temáticas")
-                ss.tematicas_df = df[[df.columns[0], df.columns[1]]].rename(
-                    columns={
-                        df.columns[0]: "termino",
-                        df.columns[1]: "normalizado",
-                    }
-                ).fillna("")
-                st.success(f"Temáticas cargadas: {len(ss.tematicas_df)}")
+            if not bloqueados:
+                if tem_up is not None:
+                    df = safe_read_excel(tem_up, "Temáticas")
+                    ss.tematicas_df = df[[df.columns[0], df.columns[1]]].rename(
+                        columns={
+                            df.columns[0]: "termino",
+                            df.columns[1]: "normalizado",
+                        }
+                    ).fillna("")
+                    st.success(f"Temáticas cargadas: {len(ss.tematicas_df)}")
 
-            if exc_up is not None:
-                df = safe_read_excel(exc_up, "Términos a excluir")
-                ss.excluir_df = df[[df.columns[0]]].rename(
-                    columns={df.columns[0]: "excluir"}
-                ).fillna("")
-                st.success(f"Términos a excluir cargados: {len(ss.excluir_df)}")
+                if exc_up is not None:
+                    df = safe_read_excel(exc_up, "Términos a excluir")
+                    ss.excluir_df = df[[df.columns[0]]].rename(
+                        columns={df.columns[0]: "excluir"}
+                    ).fillna("")
+                    st.success(f"Términos a excluir cargados: {len(ss.excluir_df)}")
+        else:
+            st.markdown("### Instrucciones rápidas – Método B")
+            st.markdown(
+                """
+1. Verifica que las bases estén sincronizadas (mensaje verde en la ventana principal).  
+2. Elige colecciones (Digital/Física) y, si lo deseas, filtra por tipo de ítem normalizado.  
+3. Define cada condición con:  
+   - Operador booleano (primera, Y, O, NO)  
+   - Campo (Título, Autor(es), Temáticas, etc.)  
+   - Tipo de coincidencia (contiene la expresión, palabra completa, es igual a)  
+   - Valor de búsqueda.  
+4. Debes completar el **valor** en todas las condiciones definidas.  
+5. Haz clic en **“Iniciar búsqueda avanzada (Método B)”**.
+                """
+            )
     else:
-        st.markdown(
-            "ℹ️ El **Método B** no requiere cargar plantillas. "
-            "Selecciona el **Método A** si quieres usar listados de temáticas."
+        st.info(
+            "Primero sincroniza las bases de datos oficiales desde la ventana principal "
+            "para habilitar las opciones de búsqueda."
         )
 
     st.markdown("---")
@@ -528,38 +564,11 @@ Al cerrar la pestaña, la sesión se pierde (no se guarda nada).
             """
         )
 else:
-    with st.expander(
-        "🧭 Paso a paso – Método B (búsqueda avanzada tipo descubridor)", expanded=True
-    ):
-        st.markdown(
-            """
-**1) Asegúrese de tener las bases sincronizadas.**  
-Use el botón **“Sincronizar bases de datos oficiales”** (o cargue los archivos manualmente desde la barra lateral).
-
-**2) Defina el alcance.**  
-Seleccione las colecciones a incluir (Digital/Física) y, si lo desea, limite por tipo de ítem normalizado  
-(p. ej., sólo **Libro**, sólo **Revista**, etc.).
-
-**3) Construya las condiciones.**  
-Cada condición tiene:
-- un **operador booleano** (primera, Y / AND, O / OR, NO / NOT),  
-- un **campo** (Título, Autor(es), Temáticas, Editorial, Cualquier campo),  
-- un **tipo de coincidencia** (contiene la expresión, palabra completa, es igual a) y  
-- un **valor** de búsqueda.
-
-Las condiciones se aplican en orden, sobre la misma tabla de resultados:
-- **Y (AND)** filtra más los resultados actuales.  
-- **O (OR)** añade nuevos resultados que cumplan la condición.  
-- **NO (NOT)** excluye de los resultados actuales los registros que cumplan la condición.
-
-**4) Ejecute la búsqueda avanzada.**  
-Pulse **“🚀 Iniciar búsqueda avanzada (Método B)”**. Verá una tabla con los títulos coincidentes.  
-Podrá **filtrar**, **marcar filas** y **exportar** en CSV/XLSX o **citas APA**.
-
-**5) Nueva búsqueda.**  
-Use el botón **“Nueva búsqueda”** para limpiar condiciones y resultados, sin volver a sincronizar las bases.
-            """
-        )
+    # Para el Método B ya dejamos las instrucciones en la barra lateral.
+    st.markdown(
+        "ℹ️ Estás usando el **Método B** (búsqueda avanzada tipo descubridor). "
+        "Las instrucciones rápidas están en la barra lateral izquierda."
+    )
 
 # ---------------------------------- NUEVA BÚSQUEDA (limpia insumos/resultados, NO bases) ----------------------------------
 col_nb = st.columns([1, 1, 4])[0]
@@ -586,12 +595,6 @@ def ejecutar_busqueda_metodo_a(col_busq1: str, col_busq2: str, col_dup_dig: str,
             "en la barra lateral."
         )
         return
-
-    excluye = [
-        str(x).strip()
-        for x in ss.excluir_df["excluir"].tolist()
-        if str(x).strip() != ""
-    ]
 
     barra = st.progress(0)
     estado = st.empty()
@@ -757,7 +760,6 @@ def _mask_condicion(base: pd.DataFrame, campo: str | None, operador: str, valor:
     def _match_series(series: pd.Series) -> pd.Series:
         series = series.fillna("").astype(str)
 
-        # Normalizamos el texto de cada celda sólo una vez
         def _norm(s: str) -> str:
             return normalize_text(s).lower()
 
@@ -805,6 +807,17 @@ def ejecutar_busqueda_metodo_b(
     tipos_sel: list[str],
     condiciones: List[Dict[str, Any]],
 ):
+    # Filtrar condiciones con valor no vacío (protección adicional)
+    condiciones = [
+        c for c in condiciones if c.get("valor", "").strip()
+    ]
+    if not condiciones:
+        st.warning(
+            "Debes indicar al menos un valor de búsqueda en las condiciones antes de ejecutar "
+            "la búsqueda avanzada."
+        )
+        return
+
     # Construir tabla base Digital + Física
     DF_D = ss.df_digital.copy()
     DF_F = ss.df_fisica.copy()
@@ -875,7 +888,11 @@ def ejecutar_busqueda_metodo_b(
             res = base[mask].copy()
 
     if res is None:
-        res = base.copy()
+        st.warning(
+            "No se encontraron resultados con las condiciones especificadas. "
+            "Revisa los términos de búsqueda."
+        )
+        return
 
     ss.results_df = res
     ss.bitacora_df = None
@@ -894,8 +911,20 @@ def render_resultados(con_bitacora: bool):
 
     res = ss.results_df.copy()
 
+    # Ocultar columnas internas: Unnamed*, Prioridad Búsqueda
+    cols_to_hide = [c for c in res.columns if c.startswith("Unnamed")]
+    if "Prioridad Búsqueda" in res.columns:
+        cols_to_hide.append("Prioridad Búsqueda")
+    if cols_to_hide:
+        res = res.drop(columns=list(dict.fromkeys(cols_to_hide)), errors="ignore")
+
     # Filtros rápidos
-    colf1, colf2, colf3 = st.columns([1, 1, 2])
+    if ss.metodo == "A":
+        colf1, colf2, colf3 = st.columns([1, 1, 2])
+    else:
+        colf1, colf3 = st.columns([1, 2])
+        colf2 = None
+
     with colf1:
         filtro_fuente = st.multiselect(
             "Fuente",
@@ -904,16 +933,20 @@ def render_resultados(con_bitacora: bool):
             else [],
             default=None,
         )
-    with colf2:
-        col_tema_norm = "Temática normalizada"
-        temas_norm = (
-            sorted(res[col_tema_norm].dropna().unique().tolist())
-            if col_tema_norm in res.columns
-            else []
-        )
-        filtro_tema = st.multiselect(
-            "Temática normalizada", options=temas_norm, default=None
-        )
+
+    filtro_tema = None
+    if ss.metodo == "A" and colf2 is not None:
+        with colf2:
+            col_tema_norm = "Temática normalizada"
+            temas_norm = (
+                sorted(res[col_tema_norm].dropna().unique().tolist())
+                if col_tema_norm in res.columns
+                else []
+            )
+            filtro_tema = st.multiselect(
+                "Temática normalizada", options=temas_norm, default=None
+            )
+
     with colf3:
         tipo_opts = (
             sorted(
@@ -1317,20 +1350,24 @@ else:
         type="primary",
         use_container_width=True,
     ):
-        try:
-            ejecutar_busqueda_metodo_b(
-                colecciones=colecciones,
-                tipos_sel=tipos_sel,
-                condiciones=conds,
+        # Validación: no permitir condiciones en blanco
+        valores = [c.get("valor", "").strip() for c in conds]
+        if any(v == "" for v in valores):
+            st.warning(
+                "Para ejecutar la búsqueda avanzada debes indicar un **valor de búsqueda** "
+                "en todas las condiciones definidas. "
+                "Si no vas a usar alguna condición, reduce el número en "
+                "“Número de condiciones”."
             )
-        except Exception as e:
-            st.error(f"Ocurrió un problema durante la búsqueda avanzada: {e}")
+        else:
+            try:
+                ejecutar_busqueda_metodo_b(
+                    colecciones=colecciones,
+                    tipos_sel=tipos_sel,
+                    condiciones=conds,
+                )
+            except Exception as e:
+                st.error(f"Ocurrió un problema durante la búsqueda avanzada: {e}")
 
     # Resultados sin bitácora ni resaltado especial
     render_resultados(con_bitacora=False)
-
-    st.subheader("📑 Bitácora por término")
-    st.info(
-        "La bitácora detallada con resultados por término sólo se genera con el **Método A** "
-        "(listado de temáticas)."
-    )
