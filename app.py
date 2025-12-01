@@ -345,15 +345,19 @@ def build_ris(row: pd.Series) -> str:
         ty = "BOOK"  # por defecto tratado como libro
     parts.append(f"TY  - {ty}")
 
+    # Abstract: tipo de ítem (Mendeley lo interpreta bien)
+    if tipo_norm:
+        parts.append(f"AB  - Tipo de ítem: {tipo_norm}")
+
     # Autores
-    aut = ""
+    aut_raw = ""
     for col in ["Autor(es)", "Autor(es) "]:
         if col in row.index:
             cand = _clean_field(row.get(col, ""))
             if cand:
-                aut = cand
+                aut_raw = cand
                 break
-    for au in _split_authors(aut):
+    for au in _split_authors(aut_raw):
         parts.append(f"AU  - {au}")
 
     # Título
@@ -386,12 +390,23 @@ def build_ris(row: pd.Series) -> str:
     if bd:
         parts.append(f"DB  - {bd}")
 
-    # URL: primero Url OA; si no, Url de acceso; si no, Url en LOCATE/IDEA
-    url = _clean_field(
-        row.get("Url OA", "")
-        or row.get("Url de acceso", "")
-        or row.get("Url en LOCATE/IDEA", "")
-    )
+    # URL:
+    #   - Primero Url OA (colección digital)
+    #   - Si no hay, Url de acceso (si existiera en resultados)
+    #   - Si no hay, Url en LOCATE/IDEA (catálogo para colección física)
+    url = ""
+    for col in [
+        "Url OA",
+        "Url de acceso",
+        "Url en LOCATE/IDEA",
+        "URL en LOCATE/IDEA",
+        "Url en LOCATE/IDEA ",
+    ]:
+        if col in row.index:
+            cand = _clean_field(row.get(col, ""))
+            if cand:
+                url = cand
+                break
     if url:
         parts.append(f"UR  - {url}")
 
@@ -407,18 +422,18 @@ def build_ris(row: pd.Series) -> str:
     if issn:
         parts.append(f"SN  - {issn}")
 
-    # Palabras clave desde Temáticas (Tags)
+    # Palabras clave desde Temáticas (Tags) – una línea KW por temática
     temas = _clean_field(row.get("Temáticas", "") or row.get("Temática", ""))
     if temas:
-        for kw in [t.strip() for t in re.split(r"[;,]", temas) if t.strip()]:
-            parts.append(f"KW  - {kw}")
-
-    # Campo opcional con tipo normalizado
-    if tipo_norm:
-        parts.append(f"N2  - Tipo de ítem: {tipo_norm}")
+        # separamos por ; , o / porque suelen venir con barras o comas
+        for kw in re.split(r"[;,/]", temas):
+            kw = kw.strip()
+            if kw:
+                parts.append(f"KW  - {kw}")
 
     parts.append("ER  - ")
     return "\n".join(parts)
+
 
 def build_ris_file(df: pd.DataFrame) -> str:
     """
@@ -428,7 +443,6 @@ def build_ris_file(df: pd.DataFrame) -> str:
     if not registros:
         return ""
     return "\n\n".join(registros) + "\n"
-
 
 # --------- CARGA CACHEADA DE LAS BASES OFICIALES (COMPARTIDA ENTRE SESIONES) ----------
 @st.cache_data(show_spinner=True)
