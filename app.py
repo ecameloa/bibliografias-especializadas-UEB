@@ -423,10 +423,15 @@ def cargar_bd_digital_cache() -> pd.DataFrame:
     """
     Descarga y carga la BD de colección Digital.
     Se ejecuta sólo la primera vez en el servidor; luego se sirve desde caché.
+
+    Usa descarga robusta con reintentos y reanudación.
     """
-    resp = requests.get(URL_DIGITAL, headers=UA, timeout=600)
-    resp.raise_for_status()
-    bio = io.BytesIO(resp.content)
+    bio = download_with_resume(
+        URL_DIGITAL,
+        label="Colección Digital",
+        timeout=600,           # puedes subirlo si lo ves necesario
+        max_retries=5,
+    )
     df = pd.read_excel(bio, engine="openpyxl", dtype=str).fillna("")
     return df
 
@@ -436,13 +441,17 @@ def cargar_bd_fisica_cache() -> pd.DataFrame:
     """
     Descarga y carga la BD de colección Física.
     Se ejecuta sólo la primera vez en el servidor; luego se sirve desde caché.
+
+    Usa descarga robusta con reintentos y reanudación.
     """
-    resp = requests.get(URL_FISICA, headers=UA, timeout=600)
-    resp.raise_for_status()
-    bio = io.BytesIO(resp.content)
+    bio = download_with_resume(
+        URL_FISICA,
+        label="Colección Física",
+        timeout=600,
+        max_retries=5,
+    )
     df = pd.read_excel(bio, engine="openpyxl", dtype=str).fillna("")
     return df
-
 
 # CSS para cambiar el texto de "Browse files" (mejor esfuerzo)
 st.markdown(
