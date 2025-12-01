@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v8.2.4 – Ajustes Método B, sincronización y columnas ocultas
+# v8.2.5 – Exportación RIS (adicional a CSV/XLSX/APA)
 
 import io
 import os
@@ -241,7 +241,7 @@ def _prep_export(df: pd.DataFrame) -> pd.DataFrame:
 
 def _clean_field(value: Any) -> str:
     """
-    Limpia campos para citas APA: elimina vacíos, 'nan', 'NO APLICA', etc.
+    Limpia campos para citas APA / RIS: elimina vacíos, 'nan', 'NO APLICA', etc.
     """
     if value is None:
         return ""
@@ -309,6 +309,112 @@ def build_apa(row: pd.Series) -> str:
         partes.append(" ".join(extras) + ".")
 
     return " ".join([p for p in partes if p]).replace("..", ".")
+
+
+# ---------- NUEVO: construccion de registros RIS ----------
+def _split_authors(raw: str) -> List[str]:
+    """
+    Divide el campo Autor(es) en autores individuales.
+    Intentamos primero por ';', luego por ' / ', y si no, devolvemos uno solo.
+    """
+    if not raw:
+        return []
+    txt = raw.strip()
+    if ";" in txt:
+        parts = [p.strip() for p in txt.split(";") if p.strip()]
+    elif " / " in txt:
+        parts = [p.strip() for p in txt.split(" / ") if p.strip()]
+    else:
+        parts = [txt]
+    return parts
+
+
+def build_ris(row: pd.Series) -> str:
+    """
+    Genera un registro RIS para una fila.
+    Compatible con Mendeley, Zotero, etc.
+    """
+    parts: List[str] = []
+
+    # Tipo de referencia (muy simplificado)
+    issn = _clean_field(row.get("ISSN1", ""))
+    tipo_norm = _clean_field(row.get(TIPO_NORMAL_COL, ""))
+    if issn:
+        ty = "JOUR"  # artículo/revista
+    else:
+        ty = "BOOK"  # por defecto tratado como libro
+    parts.append(f"TY  - {ty}")
+
+    # Autores
+    aut = ""
+    for col in ["Autor(es)", "Autor(es) "]:
+        if col in row.index:
+            cand = _clean_field(row.get(col, ""))
+            if cand:
+                aut = cand
+                break
+    for au in _split_authors(aut):
+        parts.append(f"AU  - {au}")
+
+    # Título
+    tit = _clean_field(row.get("Título", ""))
+    if tit:
+        parts.append(f"TI  - {tit}")
+
+    # Año
+    anio = _clean_field(row.get("Año de Publicación", ""))
+    if anio:
+        parts.append(f"PY  - {anio}")
+
+    # Editorial
+    edit = _clean_field(row.get("Editorial", ""))
+    if edit:
+        parts.append(f"PB  - {edit}")
+
+    # Base de datos (campo DB no estándar pero muchos gestores lo leen como nota)
+    bd = _clean_field(row.get("Base de datos", ""))
+    if bd:
+        parts.append(f"DB  - {bd}")
+
+    # URL
+    url = _clean_field(row.get("Url OA", "") or row.get("Url de acceso", ""))
+    if url:
+        parts.append(f"UR  - {url}")
+
+    # No. Topográfico como nota
+    topog = _clean_field(row.get("No. Topográfico", ""))
+    if topog:
+        parts.append(f"N1  - No. Topográfico: {topog}")
+
+    # ISBN / ISSN
+    isbn = _clean_field(row.get("ISBN", ""))
+    if isbn:
+        parts.append(f"SN  - {isbn}")
+    if issn:
+        parts.append(f"SN  - {issn}")
+
+    # Palabras clave desde Temáticas (si existen)
+    temas = _clean_field(row.get("Temáticas", "") or row.get("Temática", ""))
+    if temas:
+        for kw in [t.strip() for t in re.split(r"[;,]", temas) if t.strip()]:
+            parts.append(f"KW  - {kw}")
+
+    # Campo opcional con tipo normalizado
+    if tipo_norm:
+        parts.append(f"N2  - Tipo de ítem: {tipo_norm}")
+
+    parts.append("ER  - ")
+    return "\n".join(parts)
+
+
+def build_ris_file(df: pd.DataFrame) -> str:
+    """
+    Construye el contenido completo del archivo .ris para un conjunto de filas.
+    """
+    registros = [build_ris(row) for _, row in df.iterrows()]
+    if not registros:
+        return ""
+    return "\n\n".join(registros) + "\n"
 
 
 # --------- CARGA CACHEADA DE LAS BASES OFICIALES (COMPARTIDA ENTRE SESIONES) ----------
@@ -481,7 +587,7 @@ if not ss.bases_ready:
         )
 
     if btn_sync:
-        # Aquí se verá el spinner estándar de Streamlit + "Running cargar_bd_..."
+        # Spinner estándar de Streamlit
         with st.spinner(
             "Sincronizando colecciones **Digital** y **Física**… "
             "Esta operación se realiza sólo una vez en el servidor y puede tardar varios minutos."
@@ -583,6 +689,7 @@ with col_nb:
             ss[k] = None if k != "b_conds" else []
         ss.b_num_cond = 2
         st.toast("Listo. Carga nuevos términos o ajusta las condiciones para buscar de nuevo.")
+
 
 # ==========================================================================================
 # MÉTODO A – LISTADO DE TEMÁTICAS
@@ -897,11 +1004,10 @@ def ejecutar_busqueda_metodo_b(
             "No se encontraron resultados con las condiciones especificadas. "
             "Revisa los términos de búsqueda."
         )
-        return
-
-    ss.results_df = res
-    ss.bitacora_df = None
-    st.success(f"Búsqueda avanzada finalizada. Resultados: {len(res):,}")
+    else:
+        ss.results_df = res
+        ss.bitacora_df = None
+        st.success(f"Búsqueda avanzada finalizada. Resultados: {len(res):,}")
 
 
 # ==========================================================================================
@@ -1139,16 +1245,28 @@ def render_resultados(con_bitacora: bool):
                 use_container_width=True,
             )
 
-    # Citas APA para seleccionados
+    # Citas APA y RIS para seleccionados
     with colx5:
         if not seleccionados.empty:
+            # APA
             citas = [build_apa(r) for _, r in seleccionados.iterrows()]
             txt = "\n\n".join(c for c in citas if c.strip())
+
             st.download_button(
                 "🧾 Citas APA (seleccionados)",
                 data=txt.encode("utf-8"),
                 file_name="citas_apa.txt",
                 mime="text/plain",
+                use_container_width=True,
+            )
+
+            # RIS
+            ris_content = build_ris_file(seleccionados)
+            st.download_button(
+                "📄 Formato RIS (seleccionados)",
+                data=ris_content.encode("utf-8"),
+                file_name="referencias_seleccionadas.ris",
+                mime="application/x-research-info-systems",
                 use_container_width=True,
             )
         else:
@@ -1157,6 +1275,14 @@ def render_resultados(con_bitacora: bool):
                 data=b"",
                 file_name="citas_apa.txt",
                 mime="text/plain",
+                use_container_width=True,
+                disabled=True,
+            )
+            st.download_button(
+                "📄 Formato RIS (seleccionados)",
+                data=b"",
+                file_name="referencias_seleccionadas.ris",
+                mime="application/x-research-info-systems",
                 use_container_width=True,
                 disabled=True,
             )
