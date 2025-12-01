@@ -371,17 +371,31 @@ def build_ris(row: pd.Series) -> str:
     if edit:
         parts.append(f"PB  - {edit}")
 
-    # Base de datos (campo DB no estándar pero muchos gestores lo leen como nota)
+    # Lugar de publicación -> City (CY)
+    ciudad = _clean_field(row.get("Lugar de publicación - instances.publication", ""))
+    if ciudad:
+        parts.append(f"CY  - {ciudad}")
+
+    # Edición -> ET (Edition)
+    edicion = _clean_field(row.get("Edición - instances.editions", ""))
+    if edicion:
+        parts.append(f"ET  - {edicion}")
+
+    # Base de datos (nota informativa)
     bd = _clean_field(row.get("Base de datos", ""))
     if bd:
         parts.append(f"DB  - {bd}")
 
-    # URL
-    url = _clean_field(row.get("Url OA", "") or row.get("Url de acceso", ""))
+    # URL: primero Url OA; si no, Url de acceso; si no, Url en LOCATE/IDEA
+    url = _clean_field(
+        row.get("Url OA", "")
+        or row.get("Url de acceso", "")
+        or row.get("Url en LOCATE/IDEA", "")
+    )
     if url:
         parts.append(f"UR  - {url}")
 
-    # No. Topográfico como nota
+    # No. Topográfico como nota (sólo aplica a colección física)
     topog = _clean_field(row.get("No. Topográfico", ""))
     if topog:
         parts.append(f"N1  - No. Topográfico: {topog}")
@@ -393,7 +407,7 @@ def build_ris(row: pd.Series) -> str:
     if issn:
         parts.append(f"SN  - {issn}")
 
-    # Palabras clave desde Temáticas (si existen)
+    # Palabras clave desde Temáticas (Tags)
     temas = _clean_field(row.get("Temáticas", "") or row.get("Temática", ""))
     if temas:
         for kw in [t.strip() for t in re.split(r"[;,]", temas) if t.strip()]:
@@ -405,7 +419,6 @@ def build_ris(row: pd.Series) -> str:
 
     parts.append("ER  - ")
     return "\n".join(parts)
-
 
 def build_ris_file(df: pd.DataFrame) -> str:
     """
