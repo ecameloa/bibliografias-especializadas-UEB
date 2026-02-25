@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v8.2.5 – Exportación RIS (adicional a CSV/XLSX/APA)
+# v8.2.6 – Exportación RIS (adicional a CSV/XLSX/APA)
+# Ajuste 2026: Colección Digital dividida en Parte A (especializados) y Parte B (multidisciplinar)
 
 import io
 import os
@@ -18,8 +19,11 @@ st.set_page_config(page_title="Herramienta de bibliografías", layout="wide")
 
 LOGO_URL = "https://biblioteca.unbosque.edu.co/sites/default/files/Logos/Logo%201%20Blanco.png"
 
-# URLs oficiales (Digital/Física y plantillas)
-URL_DIGITAL = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20Colecci%C3%B3n%20Digital.xlsx"
+# URLs oficiales (Digital partes A/B, Física y plantillas)
+# Ajusta estas rutas si el nombre de los archivos en el servidor es diferente
+URL_DIGITAL_A = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20Colecci%C3%B3n%20Digital%20parte%20A%20Especializados.xlsx"
+URL_DIGITAL_B = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20Colecci%C3%B3n%20Digital%20parte%20B%20Multidisciplinar.xlsx"
+
 URL_FISICA = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20BD%20Colecci%C3%B3n%20F%C3%ADsica.xlsx"
 
 URL_PLANTILLA_TEMATICAS = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Plantilla%20Tem%C3%A1ticas.xlsx"
@@ -444,23 +448,38 @@ def build_ris_file(df: pd.DataFrame) -> str:
         return ""
     return "\n\n".join(registros) + "\n"
 
+
 # --------- CARGA CACHEADA DE LAS BASES OFICIALES (COMPARTIDA ENTRE SESIONES) ----------
 @st.cache_data(show_spinner=True)
 def cargar_bd_digital_cache() -> pd.DataFrame:
     """
-    Descarga y carga la BD de colección Digital.
+    Descarga y carga la BD de colección Digital (partes A y B) y las une.
     Se ejecuta sólo la primera vez en el servidor; luego se sirve desde caché.
 
     Usa descarga robusta con reintentos y reanudación.
     """
-    bio = download_with_resume(
-        URL_DIGITAL,
-        label="Colección Digital",
-        timeout=600,           # puedes subirlo si lo ves necesario
-        max_retries=5,
-    )
-    df = pd.read_excel(bio, engine="openpyxl", dtype=str).fillna("")
-    return df
+    partes = [
+        (URL_DIGITAL_A, "Colección Digital – Parte A (Especializados)"),
+        (URL_DIGITAL_B, "Colección Digital – Parte B (Multidisciplinar)"),
+    ]
+    df_list: List[pd.DataFrame] = []
+
+    for url, label in partes:
+        bio = download_with_resume(
+            url,
+            label=label,
+            timeout=600,
+            max_retries=5,
+        )
+        df = pd.read_excel(bio, engine="openpyxl", dtype=str).fillna("")
+        df_list.append(df)
+
+    # Homologar columnas entre las partes y unirlas verticalmente
+    all_cols = sorted(set().union(*(df.columns for df in df_list)))
+    df_list = [df.reindex(columns=all_cols) for df in df_list]
+
+    df_full = pd.concat(df_list, ignore_index=True).fillna("")
+    return df_full
 
 
 @st.cache_data(show_spinner=True)
@@ -479,6 +498,7 @@ def cargar_bd_fisica_cache() -> pd.DataFrame:
     )
     df = pd.read_excel(bio, engine="openpyxl", dtype=str).fillna("")
     return df
+
 
 # CSS para cambiar el texto de "Browse files" (mejor esfuerzo)
 st.markdown(
@@ -569,23 +589,49 @@ with st.sidebar:
         with st.expander(
             "➕ Avanzado: subir bases Digital/Física manualmente", expanded=False
         ):
-            up_dig = st.file_uploader(
-                "Base de datos de la colección Digital (.xlsx)",
+            st.markdown("#### Colección Digital (partes A y B)")
+            up_dig_a = st.file_uploader(
+                "Colección Digital – Parte A (.xlsx)",
                 type=["xlsx"],
-                key="up_dig_v82",
+                key="up_dig_a_v82",
             )
+            up_dig_b = st.file_uploader(
+                "Colección Digital – Parte B (.xlsx)",
+                type=["xlsx"],
+                key="up_dig_b_v82",
+            )
+
             up_fis = st.file_uploader(
                 "Base de datos de la colección Física (.xlsx)",
                 type=["xlsx"],
                 key="up_fis_v82",
             )
 
-            if up_dig is not None:
-                ss.df_digital = safe_read_excel(up_dig, "Colección Digital")
-                st.success("Colección Digital (manual) cargada.")
+            df_dig_parts: List[pd.DataFrame] = []
+            if up_dig_a is not None:
+                df_dig_parts.append(
+                    safe_read_excel(up_dig_a, "Colección Digital – Parte A")
+                )
+            if up_dig_b is not None:
+                df_dig_parts.append(
+                    safe_read_excel(up_dig_b, "Colección Digital – Parte B")
+                )
+
+            if df_dig_parts:
+                all_cols = sorted(set().union(*(df.columns for df in df_dig_parts)))
+                df_dig_parts = [df.reindex(columns=all_cols) for df in df_dig_parts]
+                ss.df_digital = (
+                    pd.concat(df_dig_parts, ignore_index=True).fillna("")
+                )
+                st.success(
+                    f"Colección Digital (manual) cargada. Filas: {len(ss.df_digital):,}"
+                )
+
             if up_fis is not None:
                 ss.df_fisica = safe_read_excel(up_fis, "Colección Física")
-                st.success("Colección Física (manual) cargada.")
+                st.success(
+                    f"Colección Física (manual) cargada. Filas: {len(ss.df_fisica):,}"
+                )
             if ss.df_digital is not None and ss.df_fisica is not None:
                 ss.bases_ready = True
                 st.success("✅ Bases oficiales listas en memoria (carga manual).")
