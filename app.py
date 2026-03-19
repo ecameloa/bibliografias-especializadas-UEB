@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v8.2.6 – Exportación RIS (adicional a CSV/XLSX/APA)
+# v8.2.6 – Exportación RIS (adicional a CSV/XLSX/APA) con columnas ordenadas
 # Ajuste 2026: Colección Digital dividida en Parte A (especializados) y Parte B (multidisciplinar)
 
 import io
@@ -20,7 +20,6 @@ st.set_page_config(page_title="Herramienta de bibliografías", layout="wide")
 LOGO_URL = "https://biblioteca.unbosque.edu.co/sites/default/files/Logos/Logo%201%20Blanco.png"
 
 # URLs oficiales (Digital partes A/B, Física y plantillas)
-# Ajusta estas rutas si el nombre de los archivos en el servidor es diferente
 URL_DIGITAL_A = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20Colecci%C3%B3n%20Digital%20parte%20A%20Especializados.xlsx"
 URL_DIGITAL_B = "https://biblioteca.unbosque.edu.co/sites/default/files/Formatos-Biblioteca/Biblioteca%20Colecci%C3%B3n%20Digital%20parte%20B%20Multidisciplinar.xlsx"
 
@@ -453,10 +452,9 @@ def build_ris_file(df: pd.DataFrame) -> str:
 @st.cache_data(show_spinner=True)
 def cargar_bd_digital_cache() -> pd.DataFrame:
     """
-    Descarga y carga la BD de colección Digital (partes A y B) y las une.
+    Descarga y carga la BD de colección Digital (partes A y B) y las une,
+    respetando el orden de columnas del archivo de la Parte A.
     Se ejecuta sólo la primera vez en el servidor; luego se sirve desde caché.
-
-    Usa descarga robusta con reintentos y reanudación.
     """
     partes = [
         (URL_DIGITAL_A, "Colección Digital – Parte A (Especializados)"),
@@ -474,10 +472,18 @@ def cargar_bd_digital_cache() -> pd.DataFrame:
         df = pd.read_excel(bio, engine="openpyxl", dtype=str).fillna("")
         df_list.append(df)
 
-    # Homologar columnas entre las partes y unirlas verticalmente
-    all_cols = sorted(set().union(*(df.columns for df in df_list)))
-    df_list = [df.reindex(columns=all_cols) for df in df_list]
+    # Homologar columnas sin ordenar alfabéticamente:
+    # se respeta el orden de columnas de la Parte A, añadiendo
+    # al final las columnas que existan sólo en otras partes.
+    base_cols = list(df_list[0].columns)
+    extra_cols: List[str] = []
+    for df in df_list[1:]:
+        for c in df.columns:
+            if c not in base_cols and c not in extra_cols:
+                extra_cols.append(c)
+    all_cols = base_cols + extra_cols
 
+    df_list = [df.reindex(columns=all_cols) for df in df_list]
     df_full = pd.concat(df_list, ignore_index=True).fillna("")
     return df_full
 
@@ -487,8 +493,6 @@ def cargar_bd_fisica_cache() -> pd.DataFrame:
     """
     Descarga y carga la BD de colección Física.
     Se ejecuta sólo la primera vez en el servidor; luego se sirve desde caché.
-
-    Usa descarga robusta con reintentos y reanudación.
     """
     bio = download_with_resume(
         URL_FISICA,
@@ -618,8 +622,16 @@ with st.sidebar:
                 )
 
             if df_dig_parts:
-                all_cols = sorted(set().union(*(df.columns for df in df_dig_parts)))
-                df_dig_parts = [df.reindex(columns=all_cols) for df in df_dig_parts]
+                # Igual que en la carga oficial: respetar orden de columnas de la Parte A
+                base_cols = list(df_dig_parts[0].columns)
+                extra_cols: List[str] = []
+                for dfp in df_dig_parts[1:]:
+                    for c in dfp.columns:
+                        if c not in base_cols and c not in extra_cols:
+                            extra_cols.append(c)
+                all_cols = base_cols + extra_cols
+
+                df_dig_parts = [dfp.reindex(columns=all_cols) for dfp in df_dig_parts]
                 ss.df_digital = (
                     pd.concat(df_dig_parts, ignore_index=True).fillna("")
                 )
