@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v8.3.0 – Optimización de sincronización, caché y uso de RAM en sesiones simultáneas
+# v8.3.1 – Optimización de sincronización, caché, RAM y control de búsquedas simultáneas
 # Actualización junio de 2026:
 #   - Se optimiza la extracción y sincronización de las bases oficiales de colección
 #     Digital Parte A (Especializados), Digital Parte B (Multidisciplinar) y Física,
@@ -16,6 +16,9 @@
 #   - La sincronización oficial sigue funcionando como proceso compartido: una vez una
 #     sesión carga las bases, las demás sesiones reutilizan el recurso mientras la app
 #     permanezca activa y el caché no sea invalidado por reinicio/deploy.
+#   - Se incorpora un bloqueo global de búsquedas para evitar que dos sesiones
+#     ejecuten procesos pesados al mismo tiempo. Si otra sesión está buscando,
+#     la app muestra un aviso y un botón manual para verificar disponibilidad.
 
 import io
 import os
@@ -87,6 +90,8 @@ ss.setdefault("use_manual_bases", False)
 # Insumos método A
 ss.setdefault("tematicas_df", None)
 ss.setdefault("excluir_df", None)
+ss.setdefault("tematicas_df_run", None)
+ss.setdefault("excluir_df_run", None)
 
 # Resultados comunes (A y B)
 ss.setdefault("results_df", None)
@@ -137,6 +142,86 @@ def manual_bases_are_ready() -> bool:
 
 def bases_are_ready() -> bool:
     return manual_bases_are_ready() or official_bases_are_ready()
+
+
+@st.cache_resource(show_spinner=False)
+def get_search_guard() -> dict:
+    """
+    Control compartido entre sesiones para evitar búsquedas simultáneas pesadas.
+    No altera el motor de búsqueda; solo serializa la ejecución para proteger
+    RAM/CPU cuando hay varios usuarios conectados.
+    """
+    return {
+        "lock": threading.Lock(),
+        "busy": False,
+        "method": None,
+        "started_at": None,
+    }
+
+
+def _format_elapsed(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "tiempo no disponible"
+    seconds = max(0, int(seconds))
+    mins, secs = divmod(seconds, 60)
+    hrs, mins = divmod(mins, 60)
+    if hrs:
+        return f"{hrs} h {mins} min"
+    if mins:
+        return f"{mins} min {secs} s"
+    return f"{secs} s"
+
+
+def show_search_busy_notice(context: str = "general"):
+    """Muestra aviso manual cuando otra sesión está ejecutando una búsqueda."""
+    guard = get_search_guard()
+    method = guard.get("method") or "búsqueda no identificada"
+    started_at = guard.get("started_at")
+    elapsed = _format_elapsed(time.time() - started_at) if started_at else "tiempo no disponible"
+
+    st.warning(
+        "🔎 Hay una búsqueda en curso en otra sesión. "
+        "Para proteger la estabilidad de la app, espera a que finalice antes de iniciar una nueva búsqueda."
+    )
+    st.info(f"Búsqueda activa: **{method}** · Tiempo transcurrido: **{elapsed}**")
+
+    if st.button("🔄 Verificar disponibilidad", key=f"verify_search_availability_{context}"):
+        if guard.get("busy"):
+            method = guard.get("method") or "búsqueda no identificada"
+            started_at = guard.get("started_at")
+            elapsed = _format_elapsed(time.time() - started_at) if started_at else "tiempo no disponible"
+            st.info(f"La búsqueda anterior sigue en curso: **{method}** · {elapsed}.")
+        else:
+            st.success("✅ La app está disponible. Ya puedes iniciar tu búsqueda.")
+            st.rerun()
+
+
+def run_with_search_guard(method_label: str, fn, context: str = "general"):
+    """
+    Ejecuta una búsqueda si no hay otra en curso.
+    Usa bloqueo no bloqueante: si otra sesión ya está buscando, avisa y no espera
+    en segundo plano, para evitar sobrecargar la máquina.
+    """
+    guard = get_search_guard()
+    lock = guard["lock"]
+
+    acquired = lock.acquire(blocking=False)
+    if not acquired:
+        guard["busy"] = True
+        show_search_busy_notice(context=context)
+        return
+
+    guard["busy"] = True
+    guard["method"] = method_label
+    guard["started_at"] = time.time()
+
+    try:
+        fn()
+    finally:
+        guard["busy"] = False
+        guard["method"] = None
+        guard["started_at"] = None
+        lock.release()
 
 
 # ---------------------------------- UTILIDADES ----------------------------------
@@ -878,6 +963,8 @@ with col_nb:
         for k in (
             "tematicas_df",
             "excluir_df",
+            "tematicas_df_run",
+            "excluir_df_run",
             "results_df",
             "bitacora_df",
             "b_conds",
@@ -897,6 +984,13 @@ def ejecutar_busqueda_metodo_a(col_busq1: str, col_busq2: str, col_dup_dig: str,
             "en la barra lateral."
         )
         return
+
+    # Foto pequeña de los insumos del Método A para que la ejecución no dependa
+    # de los widgets mientras la búsqueda está corriendo. No se copian las bases grandes.
+    tematicas_run = ss.tematicas_df.copy()
+    excluir_run = ss.excluir_df.copy()
+    ss.tematicas_df_run = tematicas_run
+    ss.excluir_df_run = excluir_run
 
     barra = st.progress(0)
     estado = st.empty()
@@ -955,19 +1049,19 @@ def ejecutar_busqueda_metodo_a(col_busq1: str, col_busq2: str, col_dup_dig: str,
             return pd.concat(res_list, ignore_index=True)
         return pd.DataFrame()
 
-    total = len(ss.tematicas_df) * 2
+    total = len(tematicas_run) * 2
     res_d = _buscar(
         DF_D,
         "Digital",
-        ss.tematicas_df,
+        tematicas_run,
         offset=0,
         total_steps=total,
     )
     res_f = _buscar(
         DF_F,
         "Física",
-        ss.tematicas_df,
-        offset=len(ss.tematicas_df),
+        tematicas_run,
+        offset=len(tematicas_run),
         total_steps=total,
     )
 
@@ -986,7 +1080,7 @@ def ejecutar_busqueda_metodo_a(col_busq1: str, col_busq2: str, col_dup_dig: str,
 
     # --- bitácora por término ---
     tem = (
-        ss.tematicas_df[["termino", "normalizado"]]
+        tematicas_run[["termino", "normalizado"]]
         .drop_duplicates()
         .reset_index(drop=True)
     )
@@ -1376,7 +1470,8 @@ def render_resultados(con_bitacora: bool):
 
         if con_bitacora:
             # Resaltado por términos a excluir (sólo Método A)
-            if ss.excluir_df is not None:
+            excluir_export = ss.excluir_df if ss.excluir_df is not None else ss.excluir_df_run
+            if excluir_export is not None:
                 wb = writer.book
                 ws = writer.sheets["Resultados"]
                 fmt = wb.add_format({"bg_color": "#FFF599"})
@@ -1393,7 +1488,7 @@ def render_resultados(con_bitacora: bool):
 
                 excluye = [
                     normalize_text(x)
-                    for x in ss.excluir_df["excluir"].astype(str).tolist()
+                    for x in excluir_export["excluir"].astype(str).tolist()
                     if str(x).strip()
                 ]
 
@@ -1568,15 +1663,18 @@ if ss.metodo == "A":
             type="primary",
             use_container_width=True,
         ):
-            try:
-                ejecutar_busqueda_metodo_a(
-                    col_busq1=col_busq1,
-                    col_busq2=col_busq2,
-                    col_dup_dig=col_dup_dig,
-                    col_dup_fis=col_dup_fis,
-                )
-            except Exception as e:
-                st.error(f"Ocurrió un problema durante la búsqueda: {e}")
+            def _run_metodo_a():
+                try:
+                    ejecutar_busqueda_metodo_a(
+                        col_busq1=col_busq1,
+                        col_busq2=col_busq2,
+                        col_dup_dig=col_dup_dig,
+                        col_dup_fis=col_dup_fis,
+                    )
+                except Exception as e:
+                    st.error(f"Ocurrió un problema durante la búsqueda: {e}")
+
+            run_with_search_guard("Método A – listado de temáticas", _run_metodo_a, context="metodo_a")
 
         # Mostrar resultados y bitácora
         render_resultados(con_bitacora=True)
@@ -1715,14 +1813,17 @@ else:
                 "“Número de condiciones”."
             )
         else:
-            try:
-                ejecutar_busqueda_metodo_b(
-                    colecciones=colecciones,
-                    tipos_sel=tipos_sel,
-                    condiciones=conds,
-                )
-            except Exception as e:
-                st.error(f"Ocurrió un problema durante la búsqueda avanzada: {e}")
+            def _run_metodo_b():
+                try:
+                    ejecutar_busqueda_metodo_b(
+                        colecciones=colecciones,
+                        tipos_sel=tipos_sel,
+                        condiciones=conds,
+                    )
+                except Exception as e:
+                    st.error(f"Ocurrió un problema durante la búsqueda avanzada: {e}")
+
+            run_with_search_guard("Método B – búsqueda avanzada", _run_metodo_b, context="metodo_b")
 
     # Resultados sin bitácora ni resaltado especial
     render_resultados(con_bitacora=False)
