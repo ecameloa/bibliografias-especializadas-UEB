@@ -1,12 +1,27 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v8.2.6 – Exportación RIS (adicional a CSV/XLSX/APA) con columnas ordenadas
-# Ajuste 2026: Colección Digital dividida en Parte A (especializados) y Parte B (multidisciplinar)
+# v8.3.0 – Optimización de sincronización, caché y uso de RAM en sesiones simultáneas
+# Actualización junio de 2026:
+#   - Se optimiza la extracción y sincronización de las bases oficiales de colección
+#     Digital Parte A (Especializados), Digital Parte B (Multidisciplinar) y Física,
+#     debido al crecimiento de los archivos fuente y a la sobrecarga de memoria RAM
+#     observada cuando varias sesiones ejecutan búsquedas simultáneamente.
+#   - Las bases oficiales dejan de almacenarse como copias pesadas por sesión y pasan
+#     a gestionarse como recurso global compartido mediante st.cache_resource.
+#   - Se conserva el motor de búsqueda, recuperación, bitácora, exportación CSV/XLSX,
+#     citas APA y RIS, evitando cambios funcionales en los resultados esperados.
+#   - Los archivos fuente de Excel pueden contener varias hojas; la app lee de forma
+#     explícita únicamente las hojas principales usadas por la herramienta, excluyendo
+#     hojas auxiliares como acceso abierto o resúmenes/tablas dinámicas.
+#   - La sincronización oficial sigue funcionando como proceso compartido: una vez una
+#     sesión carga las bases, las demás sesiones reutilizan el recurso mientras la app
+#     permanezca activa y el caché no sea invalidado por reinicio/deploy.
 
 import io
 import os
 import time
 import tempfile
+import threading
 from typing import List, Dict, Any
 
 import pandas as pd
@@ -32,6 +47,12 @@ DEFAULT_COL_TITULO = "Título"
 DEFAULT_COL_TEMATICAS = "Temáticas"
 DEFAULT_DUP_DIGITAL = "Url OA"
 DEFAULT_DUP_FISICA = "No. Topográfico"
+
+# Hojas principales usadas por la app. Los Excel fuente pueden incluir hojas
+# adicionales (acceso abierto, resúmenes/tablas dinámicas), que no se requieren
+# para esta herramienta y no se cargan en memoria.
+SHEET_DIGITAL = "Biblioteca_Col_Digital"
+SHEET_FISICA = "Biblioteca_Col_Física"
 
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari"  # noqa: E501
@@ -61,6 +82,7 @@ ss = st.session_state
 ss.setdefault("df_digital", None)
 ss.setdefault("df_fisica", None)
 ss.setdefault("bases_ready", False)
+ss.setdefault("use_manual_bases", False)
 
 # Insumos método A
 ss.setdefault("tematicas_df", None)
@@ -76,6 +98,45 @@ ss.setdefault("metodo", "A")
 # Estado método B
 ss.setdefault("b_num_cond", 2)
 ss.setdefault("b_conds", [])
+
+
+# ---------------------------------- ESTADO GLOBAL COMPARTIDO ----------------------------------
+@st.cache_resource(show_spinner=False)
+def get_global_base_state() -> dict:
+    """
+    Estado mínimo compartido entre sesiones.
+    No guarda DataFrames; solo banderas pequeñas para indicar si las bases oficiales
+    ya fueron sincronizadas en el proceso activo de Streamlit.
+    """
+    return {"official_bases_ready": False, "last_sync_ts": None}
+
+
+@st.cache_resource(show_spinner=False)
+def get_sync_lock():
+    """Evita que dos sesiones intenten sincronizar las bases oficiales al mismo tiempo."""
+    return threading.Lock()
+
+
+def mark_official_bases_ready():
+    state = get_global_base_state()
+    state["official_bases_ready"] = True
+    state["last_sync_ts"] = time.time()
+
+
+def official_bases_are_ready() -> bool:
+    return bool(get_global_base_state().get("official_bases_ready", False))
+
+
+def manual_bases_are_ready() -> bool:
+    return bool(
+        ss.get("use_manual_bases", False)
+        and ss.get("df_digital") is not None
+        and ss.get("df_fisica") is not None
+    )
+
+
+def bases_are_ready() -> bool:
+    return manual_bases_are_ready() or official_bases_are_ready()
 
 
 # ---------------------------------- UTILIDADES ----------------------------------
@@ -201,7 +262,9 @@ def download_with_resume(
 def safe_read_excel(bio_or_file, label: str = "archivo") -> pd.DataFrame:
     try:
         with st.spinner(f"Procesando {label}…"):
-            df = pd.read_excel(bio_or_file, engine="openpyxl", dtype=str)
+            # Se lee solo la primera hoja del archivo cargado manualmente.
+            # En las plantillas/bases oficiales, la primera hoja es la usada por la app.
+            df = pd.read_excel(bio_or_file, sheet_name=0, engine="openpyxl", dtype=str)
             if not isinstance(df, pd.DataFrame):
                 raise ValueError("El archivo no es una hoja de cálculo válida.")
             df = df.fillna("")
@@ -449,7 +512,7 @@ def build_ris_file(df: pd.DataFrame) -> str:
 
 
 # --------- CARGA CACHEADA DE LAS BASES OFICIALES (COMPARTIDA ENTRE SESIONES) ----------
-@st.cache_data(show_spinner=True)
+@st.cache_resource(show_spinner=True)
 def cargar_bd_digital_cache() -> pd.DataFrame:
     """
     Descarga y carga la BD de colección Digital (partes A y B) y las une,
@@ -469,7 +532,7 @@ def cargar_bd_digital_cache() -> pd.DataFrame:
             timeout=600,
             max_retries=5,
         )
-        df = pd.read_excel(bio, engine="openpyxl", dtype=str).fillna("")
+        df = pd.read_excel(bio, sheet_name=SHEET_DIGITAL, engine="openpyxl", dtype=str).fillna("")
         df_list.append(df)
 
     # Homologar columnas sin ordenar alfabéticamente:
@@ -488,7 +551,7 @@ def cargar_bd_digital_cache() -> pd.DataFrame:
     return df_full
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_resource(show_spinner=True)
 def cargar_bd_fisica_cache() -> pd.DataFrame:
     """
     Descarga y carga la BD de colección Física.
@@ -500,8 +563,30 @@ def cargar_bd_fisica_cache() -> pd.DataFrame:
         timeout=600,
         max_retries=5,
     )
-    df = pd.read_excel(bio, engine="openpyxl", dtype=str).fillna("")
+    df = pd.read_excel(bio, sheet_name=SHEET_FISICA, engine="openpyxl", dtype=str).fillna("")
     return df
+
+
+def get_df_digital() -> pd.DataFrame:
+    """
+    Devuelve la base digital activa.
+    Si la sesión cargó bases manuales, se usan esas; de lo contrario, se usa
+    el recurso oficial compartido en caché.
+    """
+    if manual_bases_are_ready():
+        return ss.df_digital
+    return cargar_bd_digital_cache()
+
+
+def get_df_fisica() -> pd.DataFrame:
+    """
+    Devuelve la base física activa.
+    Si la sesión cargó bases manuales, se usan esas; de lo contrario, se usa
+    el recurso oficial compartido en caché.
+    """
+    if manual_bases_are_ready():
+        return ss.df_fisica
+    return cargar_bd_fisica_cache()
 
 
 # CSS para cambiar el texto de "Browse files" (mejor esfuerzo)
@@ -522,6 +607,9 @@ button[title="Browse files"]::after{
 """,
     unsafe_allow_html=True,
 )
+
+# Actualiza la bandera de la sesión a partir del estado global compartido.
+ss.bases_ready = bases_are_ready()
 
 # ---------------------------------- SIDEBAR ----------------------------------
 with st.sidebar:
@@ -645,8 +733,9 @@ with st.sidebar:
                     f"Colección Física (manual) cargada. Filas: {len(ss.df_fisica):,}"
                 )
             if ss.df_digital is not None and ss.df_fisica is not None:
+                ss.use_manual_bases = True
                 ss.bases_ready = True
-                st.success("✅ Bases oficiales listas en memoria (carga manual).")
+                st.success("✅ Bases listas en memoria (carga manual de la sesión).")
 
 # ---------------------------------- CUERPO PRINCIPAL ----------------------------------
 st.title("Herramienta para la elaboración de bibliografías especializadas")
@@ -681,19 +770,32 @@ if not ss.bases_ready:
         )
 
     if btn_sync:
-        # Spinner estándar de Streamlit
-        with st.spinner(
-            "Sincronizando colecciones **Digital** y **Física**… "
-            "Esta operación se realiza sólo una vez en el servidor y puede tardar varios minutos."
-        ):
-            try:
-                ss.df_digital = cargar_bd_digital_cache()
-                ss.df_fisica = cargar_bd_fisica_cache()
-                ss.bases_ready = True
-                st.success("✅ Bases oficiales listas en memoria.")
-            except Exception as e:
-                st.error(f"No fue posible sincronizar las bases oficiales: {e}")
-                ss.bases_ready = False
+        # Spinner estándar de Streamlit.
+        # La sincronización oficial se guarda como recurso global compartido,
+        # no como copia pesada dentro de st.session_state.
+        lock = get_sync_lock()
+        if not lock.acquire(blocking=False):
+            st.warning(
+                "Otra sesión está sincronizando las bases oficiales en este momento. "
+                "Espera unos minutos y actualiza la página."
+            )
+        else:
+            with st.spinner(
+                "Sincronizando colecciones **Digital** y **Física**… "
+                "Esta operación se realiza sólo una vez en el servidor y puede tardar varios minutos."
+            ):
+                try:
+                    _ = cargar_bd_digital_cache()
+                    _ = cargar_bd_fisica_cache()
+                    mark_official_bases_ready()
+                    ss.use_manual_bases = False
+                    ss.bases_ready = True
+                    st.success("✅ Bases oficiales listas en memoria compartida.")
+                except Exception as e:
+                    st.error(f"No fue posible sincronizar las bases oficiales: {e}")
+                    ss.bases_ready = bases_are_ready()
+                finally:
+                    lock.release()
 
 if not ss.bases_ready:
     st.stop()
@@ -799,12 +901,11 @@ def ejecutar_busqueda_metodo_a(col_busq1: str, col_busq2: str, col_dup_dig: str,
     barra = st.progress(0)
     estado = st.empty()
 
-    DF_D = ss.df_digital.copy()
-    DF_F = ss.df_fisica.copy()
+    DF_D = get_df_digital()
+    DF_F = get_df_fisica()
 
-    # Asegurar columnas como texto
-    _prepara_columnas(DF_D, [col_busq1, col_busq2, col_dup_dig])
-    _prepara_columnas(DF_F, [col_busq1, col_busq2, col_dup_fis])
+    # Las bases oficiales ya se cargan como texto y se tratan como solo lectura.
+    # No se modifican en sitio para evitar afectar el recurso compartido entre sesiones.
 
     def _buscar(
         df: pd.DataFrame,
@@ -1002,6 +1103,78 @@ def _mask_condicion(base: pd.DataFrame, campo: str | None, operador: str, valor:
         return _match_series(base[campo])
 
 
+def _buscar_b_en_base(
+    base: pd.DataFrame,
+    fuente: str,
+    tipos_sel: list[str],
+    condiciones: List[Dict[str, Any]],
+) -> pd.DataFrame:
+    """
+    Ejecuta el Método B sobre una sola colección.
+    Mantiene la lógica booleana original, pero evita construir una tabla gigante
+    Digital + Física antes de filtrar. La columna Fuente se añade únicamente al
+    resultado final de esta colección.
+    """
+    work = base
+
+    if tipos_sel and TIPO_NORMAL_COL in work.columns:
+        work = work[work[TIPO_NORMAL_COL].isin(tipos_sel)]
+
+    res = None
+    for cond in condiciones:
+        valor = cond.get("valor", "").strip()
+        if not valor:
+            continue
+
+        campo_key = cond.get("campo", "Cualquier campo")
+        campo_col = CAMPOS_B.get(campo_key)
+
+        # Ajuste especial para Autor(es): puede ser "Autor(es)" o "Autor(es) "
+        if campo_key == "Autor(es)":
+            if "Autor(es)" in work.columns:
+                campo_col = "Autor(es)"
+            elif "Autor(es) " in work.columns:
+                campo_col = "Autor(es) "
+            else:
+                campo_col = None
+
+        operador = cond.get("operador", "Contiene la expresión")
+        conector = cond.get("conector", "(primera)")
+
+        mask = _mask_condicion(work, campo_col, operador, valor)
+
+        # Primera condición
+        if res is None:
+            if conector.startswith("NO"):
+                res = work[~mask]
+            else:
+                res = work[mask]
+            continue
+
+        # Resto de condiciones
+        if conector.startswith("Y"):
+            submask = mask.loc[res.index]
+            res = res[submask]
+        elif conector.startswith("O"):
+            nuevos = work[mask]
+            res = (
+                pd.concat([res, nuevos], ignore_index=False)
+                .drop_duplicates()
+            )
+        elif conector.startswith("NO"):
+            submask = mask.loc[res.index]
+            res = res[~submask]
+        else:
+            res = work[mask]
+
+    if res is None or res.empty:
+        return pd.DataFrame()
+
+    out = res.copy()
+    out["Fuente"] = fuente
+    return out
+
+
 def ejecutar_busqueda_metodo_b(
     colecciones: list[str],
     tipos_sel: list[str],
@@ -1018,91 +1191,39 @@ def ejecutar_busqueda_metodo_b(
         )
         return
 
-    # Construir tabla base Digital + Física
-    DF_D = ss.df_digital.copy()
-    DF_F = ss.df_fisica.copy()
-    DF_D["Fuente"] = "Digital"
-    DF_F["Fuente"] = "Física"
-    base = pd.concat([DF_D, DF_F], ignore_index=True)
+    res_list: list[pd.DataFrame] = []
 
-    if colecciones:
-        base = base[base["Fuente"].isin(colecciones)]
-
-    if tipos_sel and TIPO_NORMAL_COL in base.columns:
-        base = base[base[TIPO_NORMAL_COL].isin(tipos_sel)]
-
-    # Nos aseguramos que todas las columnas relevantes sean texto
-    _prepara_columnas(
-        base,
-        [
-            "Título",
-            "Autor(es)",
-            "Autor(es) ",
-            "Temáticas",
-            "Editorial",
-            "Base de datos",
-            "Año de Publicación",
-        ],
-    )
-
-    res = None
-    for idx, cond in enumerate(condiciones):
-        valor = cond.get("valor", "").strip()
-        if not valor:
-            continue
-
-        campo_key = cond.get("campo", "Cualquier campo")
-        campo_col = CAMPOS_B.get(campo_key)
-
-        # Ajuste especial para Autor(es): puede ser "Autor(es)" o "Autor(es) "
-        if campo_key == "Autor(es)":
-            if "Autor(es)" in base.columns:
-                campo_col = "Autor(es)"
-            elif "Autor(es) " in base.columns:
-                campo_col = "Autor(es) "
-            else:
-                campo_col = None
-
-        operador = cond.get("operador", "Contiene la expresión")
-        conector = cond.get("conector", "(primera)")
-
-        mask = _mask_condicion(base, campo_col, operador, valor)
-
-        # Primera condición
-        if res is None:
-            if conector.startswith("NO"):
-                res = base[~mask].copy()
-            else:
-                res = base[mask].copy()
-            continue
-
-        # Resto de condiciones
-        if conector.startswith("Y"):
-            submask = mask.loc[res.index]
-            res = res[submask].copy()
-        elif conector.startswith("O"):
-            nuevos = base[mask].copy()
-            res = (
-                pd.concat([res, nuevos], ignore_index=True)
-                .drop_duplicates()
-                .reset_index(drop=True)
+    if "Digital" in colecciones:
+        res_list.append(
+            _buscar_b_en_base(
+                base=get_df_digital(),
+                fuente="Digital",
+                tipos_sel=tipos_sel,
+                condiciones=condiciones,
             )
-        elif conector.startswith("NO"):
-            submask = mask.loc[res.index]
-            res = res[~submask].copy()
-        else:
-            res = base[mask].copy()
+        )
 
-    if res is None:
+    if "Física" in colecciones:
+        res_list.append(
+            _buscar_b_en_base(
+                base=get_df_fisica(),
+                fuente="Física",
+                tipos_sel=tipos_sel,
+                condiciones=condiciones,
+            )
+        )
+
+    res_list = [r for r in res_list if not r.empty]
+
+    if not res_list:
         st.warning(
             "No se encontraron resultados con las condiciones especificadas. "
             "Revisa los términos de búsqueda."
         )
     else:
-        ss.results_df = res
+        ss.results_df = pd.concat(res_list, ignore_index=True)
         ss.bitacora_df = None
-        st.success(f"Búsqueda avanzada finalizada. Resultados: {len(res):,}")
-
+        st.success(f"Búsqueda avanzada finalizada. Resultados: {len(ss.results_df):,}")
 
 # ==========================================================================================
 # RENDERIZADO COMÚN DE RESULTADOS + EXPORTACIONES
@@ -1395,8 +1516,10 @@ if ss.metodo == "A":
     else:
         st.subheader("Configuración de búsqueda y duplicados (Método A)")
 
-        cols_dig = list(ss.df_digital.columns)
-        cols_fis = list(ss.df_fisica.columns)
+        df_dig_actual = get_df_digital()
+        df_fis_actual = get_df_fisica()
+        cols_dig = list(df_dig_actual.columns)
+        cols_fis = list(df_fis_actual.columns)
         common_cols = sorted(set(cols_dig + cols_fis))
 
         c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
@@ -1485,12 +1608,17 @@ else:
         )
     with colc2:
         # tipos normalizados disponibles
+        tipos_series: list[pd.Series] = []
+        df_dig_actual = get_df_digital()
+        df_fis_actual = get_df_fisica()
+        if TIPO_NORMAL_COL in df_dig_actual.columns:
+            tipos_series.append(df_dig_actual[TIPO_NORMAL_COL])
+        if TIPO_NORMAL_COL in df_fis_actual.columns:
+            tipos_series.append(df_fis_actual[TIPO_NORMAL_COL])
         todos_tipos = sorted(
-            pd.concat([ss.df_digital, ss.df_fisica], ignore_index=True)
-            .get(TIPO_NORMAL_COL, pd.Series(dtype=str))
-            .dropna()
-            .unique()
-            .tolist()
+            pd.concat(tipos_series, ignore_index=True).dropna().unique().tolist()
+            if tipos_series
+            else []
         )
         tipos_sel = st.multiselect(
             "Tipo de ítem normalizado",
