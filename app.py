@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Herramienta para la elaboración de bibliografías especializadas
-# v8.3.1 – Optimización de sincronización, caché, RAM y control de búsquedas simultáneas
+# v8.3.2 – Optimización de sincronización, caché, RAM y estado visual de búsquedas
 # Actualización junio de 2026:
 #   - Se optimiza la extracción y sincronización de las bases oficiales de colección
 #     Digital Parte A (Especializados), Digital Parte B (Multidisciplinar) y Física,
@@ -18,7 +18,11 @@
 #     permanezca activa y el caché no sea invalidado por reinicio/deploy.
 #   - Se incorpora un bloqueo global de búsquedas para evitar que dos sesiones
 #     ejecuten procesos pesados al mismo tiempo. Si otra sesión está buscando,
-#     la app muestra un aviso y un botón manual para verificar disponibilidad.
+#     la app muestra un panel de estado permanente, deshabilita el botón de búsqueda
+#     y permite actualizar manualmente la disponibilidad sin ejecutar procesos adicionales.
+#   - Ajuste v8.3.2: se mejora la experiencia visual del segundo usuario conectado;
+#     el botón de búsqueda queda inhabilitado mientras exista una búsqueda activa y
+#     el panel de estado se mantiene visible hasta que la búsqueda global finalice.
 
 import io
 import os
@@ -172,12 +176,32 @@ def _format_elapsed(seconds: float | int | None) -> str:
     return f"{secs} s"
 
 
-def show_search_busy_notice(context: str = "general"):
-    """Muestra aviso manual cuando otra sesión está ejecutando una búsqueda."""
+def get_search_status() -> tuple[bool, str, str]:
+    """
+    Devuelve el estado global de búsqueda para renderizar la interfaz.
+    Se considera ocupada si el indicador busy está activo o si el lock está tomado.
+    Esto evita estados visuales ambiguos si dos usuarios hacen clic casi al mismo tiempo.
+    """
     guard = get_search_guard()
+    lock = guard.get("lock")
+    locked = bool(lock.locked()) if lock is not None else False
+    busy = bool(guard.get("busy") or locked)
     method = guard.get("method") or "búsqueda no identificada"
     started_at = guard.get("started_at")
     elapsed = _format_elapsed(time.time() - started_at) if started_at else "tiempo no disponible"
+    return busy, method, elapsed
+
+
+def render_search_status_panel(context: str = "general") -> bool:
+    """
+    Muestra el estado global de búsquedas y devuelve True si la búsqueda debe
+    quedar deshabilitada. No ejecuta esperas ni verificaciones automáticas;
+    sólo permite un refresco manual seguro mediante st.rerun().
+    """
+    busy, method, elapsed = get_search_status()
+
+    if not busy:
+        return False
 
     st.warning(
         "🔎 Hay una búsqueda en curso en otra sesión. "
@@ -185,15 +209,15 @@ def show_search_busy_notice(context: str = "general"):
     )
     st.info(f"Búsqueda activa: **{method}** · Tiempo transcurrido: **{elapsed}**")
 
-    if st.button("🔄 Verificar disponibilidad", key=f"verify_search_availability_{context}"):
-        if guard.get("busy"):
-            method = guard.get("method") or "búsqueda no identificada"
-            started_at = guard.get("started_at")
-            elapsed = _format_elapsed(time.time() - started_at) if started_at else "tiempo no disponible"
-            st.info(f"La búsqueda anterior sigue en curso: **{method}** · {elapsed}.")
-        else:
-            st.success("✅ La app está disponible. Ya puedes iniciar tu búsqueda.")
-            st.rerun()
+    if st.button("🔄 Actualizar estado de búsqueda", key=f"refresh_search_status_{context}"):
+        st.rerun()
+
+    return True
+
+
+def show_search_busy_notice(context: str = "general"):
+    """Compatibilidad interna: muestra el panel de estado cuando el lock ya está ocupado."""
+    render_search_status_panel(context=context)
 
 
 def run_with_search_guard(method_label: str, fn, context: str = "general"):
@@ -1658,10 +1682,13 @@ if ss.metodo == "A":
 
         st.markdown("---")
 
+        search_disabled = render_search_status_panel(context="metodo_a")
+
         if st.button(
             "🚀 Iniciar búsqueda (Método A)",
             type="primary",
             use_container_width=True,
+            disabled=search_disabled,
         ):
             def _run_metodo_a():
                 try:
@@ -1798,10 +1825,13 @@ else:
 
     ss.b_conds = conds
 
+    search_disabled = render_search_status_panel(context="metodo_b")
+
     if st.button(
         "🚀 Iniciar búsqueda avanzada (Método B)",
         type="primary",
         use_container_width=True,
+        disabled=search_disabled,
     ):
         # Validación: no permitir condiciones en blanco
         valores = [c.get("valor", "").strip() for c in conds]
